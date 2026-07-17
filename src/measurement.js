@@ -25,6 +25,30 @@ export function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+// MediaPipe Face Landmarker의 z는 실제 mm가 아니라 x축과 비슷한 스케일의
+// 상대 깊이값이다. x/y/z를 같은 계산 공간으로 옮겨 3D 비율 보정에 사용한다.
+export function toRelative3D(landmark, width, height) {
+  return {
+    x: (landmark.x - 0.5) * width,
+    y: (landmark.y - 0.5) * height,
+    z: landmark.z * width,
+  };
+}
+
+export function distance3D(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+export function maxPairwiseDistance3D(points) {
+  let maximum = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      maximum = Math.max(maximum, distance3D(points[i], points[j]));
+    }
+  }
+  return maximum;
+}
+
 export function maxPairwiseDistance(points) {
   let maximum = 0;
   for (let i = 0; i < points.length; i += 1) {
@@ -183,17 +207,51 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
     throw new Error('홍채 지름 계산에 실패했습니다.');
   }
 
+  // 2D 기준값: 기존 픽셀 비율 방식
   const mmPerPixel = irisReferenceMm / meanIrisPx;
-  const pdMm = pdPx * mmPerPixel;
+  const pdMm2D = pdPx * mmPerPixel;
+
+  // 3D 기준값: MediaPipe의 상대 z를 포함한 얼굴 메시에 같은 11.7mm 스케일을 적용한다.
+  // 절대 깊이 센서가 아니라 상대 3D 복원이며, 2D 결과와 교차 검증한다.
+  const rightCenter3D = toRelative3D(landmarks[LANDMARKS.rightIrisCenter], width, height);
+  const leftCenter3D = toRelative3D(landmarks[LANDMARKS.leftIrisCenter], width, height);
+  const rightBoundary3D = LANDMARKS.rightIrisBoundary.map((index) => toRelative3D(landmarks[index], width, height));
+  const leftBoundary3D = LANDMARKS.leftIrisBoundary.map((index) => toRelative3D(landmarks[index], width, height));
+  const pd3DUnits = distance3D(leftCenter3D, rightCenter3D);
+  const rightIris3DUnits = maxPairwiseDistance3D(rightBoundary3D);
+  const leftIris3DUnits = maxPairwiseDistance3D(leftBoundary3D);
+  const meanIris3DUnits = (leftIris3DUnits + rightIris3DUnits) / 2;
+
+  if (!(meanIris3DUnits > 0)) {
+    throw new Error('3D 홍채 지름 계산에 실패했습니다.');
+  }
+
+  const pdMm3D = pd3DUnits * irisReferenceMm / meanIris3DUnits;
+  const estimateMean = (pdMm2D + pdMm3D) / 2;
+  const disagreementRatio = Math.abs(pdMm3D - pdMm2D) / estimateMean;
+
+  // 상대 z는 유용하지만 센서 기반 metric depth는 아니다. 3D를 주값으로 두되
+  // 2D 값을 보조로 섞어 홍채 z 노이즈가 최종값을 지배하지 않게 한다.
+  const pdMm = pdMm3D * 0.7 + pdMm2D * 0.3;
 
   return {
     pdPx,
     pdMm,
+    pdMm2D,
+    pdMm3D,
     mmPerPixel,
     leftIrisPx,
     rightIrisPx,
     meanIrisPx,
     irisDifferenceRatio,
+    depthAware: {
+      pd3DUnits,
+      leftIris3DUnits,
+      rightIris3DUnits,
+      meanIris3DUnits,
+      disagreementRatio,
+      fusion3DWeight: 0.7,
+    },
     pose: extractPoseDegrees(matrix),
     framing: calculateFraming(landmarks),
     eyeAndPerspective: calculateEyeAndPerspectiveMetrics(landmarks, width, height, points),
@@ -281,6 +339,16 @@ export function evaluateQuality(measurement, config) {
     if (eyeAndPerspective.irisDepthDifference > config.maxIrisDepthDifference) {
       warnings.push('좌우 눈의 상대 깊이 차이가 큽니다.');
       score -= 8;
+    }
+  }
+
+  if (measurement.depthAware) {
+    const disagreement = measurement.depthAware.disagreementRatio;
+    score -= Math.min(20, disagreement * 120);
+    if (disagreement > config.max2D3DDisagreementRatio) {
+      reasons.push(`2D/3D 추정 차이 ${(disagreement * 100).toFixed(1)}%`);
+    } else if (disagreement > config.warn2D3DDisagreementRatio) {
+      warnings.push(`2D/3D 추정값 차이가 ${(disagreement * 100).toFixed(1)}%입니다.`);
     }
   }
 

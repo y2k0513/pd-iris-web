@@ -4,6 +4,7 @@ import {
   calculateFraming,
   extractPoseDegrees,
   maxPairwiseDistance,
+  maxPairwiseDistance3D,
   measurePd,
   projectionFraction,
 } from './src/measurement.js';
@@ -56,4 +57,31 @@ test('iris scale converts pixel PD to millimetres and calculates symmetry', () =
   assert.ok(Math.abs(result.pdMm - (250 * 11.7 / 46)) < 1e-6);
   assert.ok(result.eyeAndPerspective.gazeOffset < 0.01);
   assert.ok(result.eyeAndPerspective.perspectiveAsymmetryRatio < 0.01);
+});
+
+
+test('3D iris ratio changes when relative depth differs', () => {
+  const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  const width = 1000;
+  const height = 1000;
+
+  landmarks[468] = { x: 0.375, y: 0.5, z: 0.01 };
+  landmarks[473] = { x: 0.625, y: 0.5, z: -0.01 };
+  for (const [index, x, y, z] of [
+    [469, 0.352, 0.5, 0.01], [470, 0.375, 0.477, 0.01], [471, 0.398, 0.5, 0.01], [472, 0.375, 0.523, 0.01],
+    [474, 0.602, 0.5, -0.01], [475, 0.625, 0.477, -0.01], [476, 0.648, 0.5, -0.01], [477, 0.625, 0.523, -0.01],
+    [33, 0.32, 0.5, 0], [133, 0.43, 0.5, 0], [159, 0.375, 0.49, 0], [145, 0.375, 0.51, 0],
+    [362, 0.57, 0.5, 0], [263, 0.68, 0.5, 0], [386, 0.625, 0.49, 0], [374, 0.625, 0.51, 0],
+    [1, 0.5, 0.56, -0.03],
+  ]) landmarks[index] = { x, y, z };
+
+  const result = measurePd({ landmarks, width, height, irisReferenceMm: 11.7 });
+  assert.ok(result.pdMm3D > result.pdMm2D);
+  assert.ok(result.depthAware.disagreementRatio > 0);
+  assert.ok(Math.abs(result.pdMm - (result.pdMm3D * 0.7 + result.pdMm2D * 0.3)) < 1e-9);
+});
+
+test('maxPairwiseDistance3D includes z depth', () => {
+  const points = [{ x: 0, y: 0, z: -2 }, { x: 0, y: 0, z: 2 }];
+  assert.equal(maxPairwiseDistance3D(points), 4);
 });

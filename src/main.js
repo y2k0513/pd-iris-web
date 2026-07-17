@@ -35,6 +35,8 @@ const elements = {
   irisDiffValue: document.querySelector('#irisDiffValue'),
   poseValue: document.querySelector('#poseValue'),
   perspectiveValue: document.querySelector('#perspectiveValue'),
+  depthEstimateValue: document.querySelector('#depthEstimateValue'),
+  depthAgreementValue: document.querySelector('#depthAgreementValue'),
   framingValue: document.querySelector('#framingValue'),
   resolutionValue: document.querySelector('#resolutionValue'),
   qualityScoreValue: document.querySelector('#qualityScoreValue'),
@@ -144,6 +146,8 @@ function getConfig() {
     maxPerspectiveAsymmetryRatio: 0.12,
     maxEyeWidthDifferenceRatio: 0.16,
     maxIrisDepthDifference: 0.018,
+    max2D3DDisagreementRatio: 0.07,
+    warn2D3DDisagreementRatio: 0.04,
   };
 }
 
@@ -323,11 +327,16 @@ function updateLiveIndicators(measurement, quality, ready, variation) {
     && Math.abs(pose.pitch) <= getConfig().maxPitch
     && Math.abs(pose.roll) <= getConfig().maxRoll;
   const perspectiveOk = eyeAndPerspective.perspectiveAsymmetryRatio <= getConfig().maxPerspectiveAsymmetryRatio
-    && measurement.irisDifferenceRatio <= getConfig().maxIrisDifferenceRatio;
+    && measurement.irisDifferenceRatio <= getConfig().maxIrisDifferenceRatio
+    && measurement.depthAware.disagreementRatio <= getConfig().max2D3DDisagreementRatio;
   const gazeOk = eyeAndPerspective.gazeOffset <= getConfig().maxGazeOffset;
 
   setCheck(elements.poseCheck, poseOk, `자세 ${pose.yaw.toFixed(1)}/${pose.pitch.toFixed(1)}/${pose.roll.toFixed(1)}°`);
-  setCheck(elements.perspectiveCheck, perspectiveOk, `원근 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}%`);
+  setCheck(
+    elements.perspectiveCheck,
+    perspectiveOk,
+    `원근 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 3D차 ${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}%`,
+  );
   setCheck(elements.gazeCheck, gazeOk, `시선 ${(eyeAndPerspective.gazeOffset * 100).toFixed(0)}%`);
   setCheck(
     elements.stabilityCheck,
@@ -549,6 +558,8 @@ function updateMetrics(canvas, measurement, quality) {
     : '계산 불가';
   const perspective = measurement.eyeAndPerspective;
   elements.perspectiveValue.textContent = `대칭 ${(perspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 시선 ${(perspective.gazeOffset * 100).toFixed(0)}%`;
+  elements.depthEstimateValue.textContent = `2D ${measurement.pdMm2D.toFixed(1)} mm · 3D ${measurement.pdMm3D.toFixed(1)} mm`;
+  elements.depthAgreementValue.textContent = `${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}% · 3D 가중치 ${(measurement.depthAware.fusion3DWeight * 100).toFixed(0)}%`;
   const framing = measurement.framing;
   elements.framingValue.textContent = `얼굴 ${(framing.faceHeightRatio * 100).toFixed(0)}% · 중심 X ${(framing.centerOffsetX * 100).toFixed(0)}% / Y ${(framing.centerOffsetY * 100).toFixed(0)}%`;
   elements.resolutionValue.textContent = `${canvas.width}×${canvas.height}`;
@@ -562,6 +573,8 @@ function resetMetrics() {
   elements.irisDiffValue.textContent = '--';
   elements.poseValue.textContent = '--';
   elements.perspectiveValue.textContent = '--';
+  elements.depthEstimateValue.textContent = '--';
+  elements.depthAgreementValue.textContent = '--';
   elements.framingValue.textContent = '--';
   elements.resolutionValue.textContent = '--';
   elements.qualityScoreValue.textContent = '--';
