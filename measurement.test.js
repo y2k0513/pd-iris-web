@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  SEX_PD_PRIORS,
   applySexPdPrior,
   calculateFraming,
   extractPoseDegrees,
@@ -89,13 +90,20 @@ test('maxPairwiseDistance3D includes z depth', () => {
 });
 
 
-test('sex PD prior has loss 1 at each stated distribution boundary', () => {
-  const male = applySexPdPrior({ rawPdMm: 70, sex: 'male', qualityScore: 100, strength: 0.6 });
-  const female = applySexPdPrior({ rawPdMm: 58, sex: 'female', qualityScore: 100, strength: 0.6 });
-  assert.ok(Math.abs(male.priorLoss - 1) < 1e-12);
-  assert.ok(Math.abs(female.priorLoss - 1) < 1e-12);
-  assert.equal(male.centerMm, 67);
-  assert.equal(female.centerMm, 61);
+test('sex PD prior uses the stated midpoint and has loss 1 at both range boundaries', () => {
+  for (const sex of ['male', 'female']) {
+    const prior = SEX_PD_PRIORS[sex];
+    const expectedCenter = (prior.minMm + prior.maxMm) / 2;
+    const expectedScale = (prior.maxMm - prior.minMm) / 2;
+
+    assert.equal(prior.centerMm, expectedCenter);
+    assert.equal(prior.scaleMm, expectedScale);
+
+    for (const rawPdMm of [prior.minMm, prior.maxMm]) {
+      const result = applySexPdPrior({ rawPdMm, sex, qualityScore: 100, strength: 0.6 });
+      assert.ok(Math.abs(result.priorLoss - 1) < 1e-12);
+    }
+  }
 });
 
 test('sex PD prior softly pulls an outlying value toward the center without clipping', () => {

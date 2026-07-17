@@ -1,7 +1,7 @@
 
 export const SEX_PD_PRIORS = Object.freeze({
-  male: Object.freeze({ label: '남성', minMm: 62, maxMm: 68, centerMm: 65, scaleMm: 2 }),
-  female: Object.freeze({ label: '여성', minMm: 58, maxMm: 64, centerMm: 61, scaleMm: 2 }),
+  male: Object.freeze({ label: '남성', minMm: 64, maxMm: 70, centerMm: 67, scaleMm: 3 }),
+  female: Object.freeze({ label: '여성', minMm: 58, maxMm: 64, centerMm: 61, scaleMm: 3 }),
 });
 
 function clamp(value, min, max) {
@@ -15,7 +15,7 @@ export function applySexPdPrior({
   rawPdMm,
   sex,
   qualityScore = 100,
-  strength = 0.75,
+  strength = 0.6,
 }) {
   const prior = SEX_PD_PRIORS[sex];
   if (!prior) {
