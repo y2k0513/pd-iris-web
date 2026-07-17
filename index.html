@@ -27,6 +27,16 @@
             <span id="cameraMeta" class="muted">카메라 대기</span>
           </div>
 
+          <div class="subject-input-row">
+            <label for="sexInput">성별</label>
+            <select id="sexInput" required>
+              <option value="">선택하세요</option>
+              <option value="male">남성 · 기준 64–70mm</option>
+              <option value="female">여성 · 기준 58–64mm</option>
+            </select>
+            <span id="sexPriorHint">성별 분포를 선택하면 중심값 기반 soft prior를 적용합니다.</span>
+          </div>
+
           <div class="media-stage" id="mediaStage">
             <video id="cameraVideo" autoplay muted playsinline hidden></video>
             <canvas id="captureCanvas" hidden></canvas>
@@ -61,7 +71,7 @@
           </div>
 
           <div class="web-limit-note">
-            촬영 준비를 누른 뒤 자세 조건을 맞추면 1초간 유지 여부를 확인하고 자동 촬영합니다. 최종 PD는 2D 홍채 비율로 계산하며 상대 3D는 원근 이상 검증에만 사용합니다.
+            촬영 준비를 누른 뒤 자세 조건을 맞추면 1초간 유지 여부를 확인하고 자동 촬영합니다. 원본 PD는 2D 홍채 비율로 계산하고, 성별 분포 중심에서 멀어질수록 soft prior loss를 적용합니다. 상대 3D는 원근 이상 검증에만 사용합니다.
           </div>
           <p class="privacy-note">사진은 브라우저 안에서만 처리되며 서버로 전송하지 않습니다.</p>
         </article>
@@ -81,14 +91,18 @@
           </div>
 
           <div class="pd-card">
-            <span>추정 양안 PD</span>
+            <span>성별 prior 보정 PD</span>
             <strong><span id="pdValue">--</span> mm</strong>
-            <small>처방용 실측값이 아닌 평균 홍채 지름 기반 추정값</small>
+            <small>원본 2D 측정값을 유지하면서 성별 분포 중심을 약하게 반영한 추정값</small>
           </div>
 
           <div id="messageBox" class="message-box info">모델과 카메라를 준비하고 있습니다.</div>
 
           <dl class="metrics">
+            <div><dt>원본 2D PD</dt><dd id="rawPdValue">-- mm</dd></div>
+            <div><dt>성별 분포 / 중심</dt><dd id="priorCenterValue">--</dd></div>
+            <div><dt>성별 prior loss</dt><dd id="priorLossValue">--</dd></div>
+            <div><dt>prior 반영 비율</dt><dd id="priorWeightValue">--</dd></div>
             <div><dt>눈 사이 거리</dt><dd id="pdPxValue">-- px</dd></div>
             <div><dt>평균 홍채 지름</dt><dd id="irisPxValue">-- px</dd></div>
             <div><dt>좌/우 홍채 차이</dt><dd id="irisDiffValue">--</dd></div>
@@ -109,13 +123,14 @@
         </div>
         <div class="settings-grid">
           <label>기준 홍채 지름<span><input id="irisReferenceInput" type="number" min="9" max="14" step="0.1" value="11.7" /> mm</span></label>
+          <label>성별 prior 강도<span><input id="priorStrengthInput" type="number" min="0" max="1" step="0.05" value="0.6" /></span></label>
           <label>최대 Yaw<span><input id="maxYawInput" type="number" min="1" max="20" step="1" value="6" />°</span></label>
           <label>최대 Pitch<span><input id="maxPitchInput" type="number" min="1" max="20" step="1" value="7" />°</span></label>
           <label>최대 Roll<span><input id="maxRollInput" type="number" min="1" max="20" step="1" value="5" />°</span></label>
         </div>
       </section>
 
-      <footer><p>최종값은 2D 홍채 비율 기반이며 상대 3D는 품질 검사용입니다. 홍채 실제 크기의 개인차로 수 mm 오차가 발생할 수 있습니다.</p></footer>
+      <footer><p>원본 측정은 2D 홍채 비율 기반이며 상대 3D는 품질 검사용입니다. 성별 prior는 hard clipping이 아니라 약한 보정이므로 원본 PD도 함께 확인하세요.</p></footer>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

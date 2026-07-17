@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applySexPdPrior,
   calculateFraming,
   extractPoseDegrees,
   maxPairwiseDistance,
@@ -85,4 +86,29 @@ test('3D iris ratio is retained for quality checking while final PD stays 2D', (
 test('maxPairwiseDistance3D includes z depth', () => {
   const points = [{ x: 0, y: 0, z: -2 }, { x: 0, y: 0, z: 2 }];
   assert.equal(maxPairwiseDistance3D(points), 4);
+});
+
+
+test('sex PD prior has loss 1 at each stated distribution boundary', () => {
+  const male = applySexPdPrior({ rawPdMm: 70, sex: 'male', qualityScore: 100, strength: 0.6 });
+  const female = applySexPdPrior({ rawPdMm: 58, sex: 'female', qualityScore: 100, strength: 0.6 });
+  assert.ok(Math.abs(male.priorLoss - 1) < 1e-12);
+  assert.ok(Math.abs(female.priorLoss - 1) < 1e-12);
+  assert.equal(male.centerMm, 67);
+  assert.equal(female.centerMm, 61);
+});
+
+test('sex PD prior softly pulls an outlying value toward the center without clipping', () => {
+  const result = applySexPdPrior({ rawPdMm: 74, sex: 'male', qualityScore: 70, strength: 0.6 });
+  assert.ok(result.adjustedPdMm < 74);
+  assert.ok(result.adjustedPdMm > 67);
+  assert.ok(result.priorLoss > 1);
+  assert.ok(result.priorWeight > 0 && result.priorWeight < 1);
+  assert.equal(result.withinTypicalRange, false);
+});
+
+test('zero prior strength preserves raw PD exactly', () => {
+  const result = applySexPdPrior({ rawPdMm: 72, sex: 'male', qualityScore: 50, strength: 0 });
+  assert.equal(result.adjustedPdMm, 72);
+  assert.equal(result.priorWeight, 0);
 });

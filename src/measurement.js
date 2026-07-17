@@ -1,3 +1,60 @@
+
+export const SEX_PD_PRIORS = Object.freeze({
+  male: Object.freeze({ label: '남성', minMm: 64, maxMm: 70, centerMm: 67, scaleMm: 3 }),
+  female: Object.freeze({ label: '여성', minMm: 58, maxMm: 64, centerMm: 61, scaleMm: 3 }),
+});
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+// 성별 분포를 hard clipping이 아닌 soft prior로 사용한다.
+// priorLoss는 분포 중심에서 반폭(scaleMm)만큼 떨어지면 1이 되는 정규화 제곱손실이다.
+// 최종값은 측정값과 prior 중심의 정밀도 가중 평균이며, 촬영 품질이 낮을수록 prior 영향이 커진다.
+export function applySexPdPrior({
+  rawPdMm,
+  sex,
+  qualityScore = 100,
+  strength = 0.6,
+}) {
+  const prior = SEX_PD_PRIORS[sex];
+  if (!prior) {
+    throw new Error('성별을 남성 또는 여성으로 선택하세요.');
+  }
+  if (!Number.isFinite(rawPdMm)) {
+    throw new Error('유효한 PD 측정값이 필요합니다.');
+  }
+
+  const boundedStrength = clamp(Number(strength) || 0, 0, 1);
+  const boundedQuality = clamp(Number(qualityScore) || 0, 0, 100) / 100;
+  const normalizedDistance = (rawPdMm - prior.centerMm) / prior.scaleMm;
+  const priorLoss = normalizedDistance ** 2;
+
+  // 품질 100점에서는 측정 표준오차를 약 0.8mm, 낮은 품질에서는 최대 3.0mm로 본다.
+  const measurementSigmaMm = 0.8 + (1 - boundedQuality) * 2.2;
+  const measurementPrecision = 1 / (measurementSigmaMm ** 2);
+  const priorPrecision = boundedStrength / (prior.scaleMm ** 2);
+  const totalPrecision = measurementPrecision + priorPrecision;
+  const priorWeight = totalPrecision > 0 ? priorPrecision / totalPrecision : 0;
+  const adjustedPdMm = rawPdMm * (1 - priorWeight) + prior.centerMm * priorWeight;
+
+  return {
+    sex,
+    label: prior.label,
+    minMm: prior.minMm,
+    maxMm: prior.maxMm,
+    centerMm: prior.centerMm,
+    scaleMm: prior.scaleMm,
+    rawPdMm,
+    adjustedPdMm,
+    normalizedDistance,
+    priorLoss,
+    priorWeight,
+    measurementSigmaMm,
+    withinTypicalRange: rawPdMm >= prior.minMm && rawPdMm <= prior.maxMm,
+  };
+}
+
 export const LANDMARKS = Object.freeze({
   rightIrisCenter: 468,
   rightIrisBoundary: [469, 470, 471, 472],

@@ -1,6 +1,6 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import './style.css';
-import { evaluateQuality, measurePd } from './measurement.js';
+import { applySexPdPrior, evaluateQuality, measurePd, SEX_PD_PRIORS } from './measurement.js';
 
 const OFFICIAL_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
@@ -26,11 +26,17 @@ const elements = {
   captureButton: document.querySelector('#captureButton'),
   stopCameraButton: document.querySelector('#stopCameraButton'),
   galleryInput: document.querySelector('#galleryInput'),
+  sexInput: document.querySelector('#sexInput'),
+  sexPriorHint: document.querySelector('#sexPriorHint'),
   poseCheck: document.querySelector('#poseCheck'),
   perspectiveCheck: document.querySelector('#perspectiveCheck'),
   gazeCheck: document.querySelector('#gazeCheck'),
   stabilityCheck: document.querySelector('#stabilityCheck'),
   pdValue: document.querySelector('#pdValue'),
+  rawPdValue: document.querySelector('#rawPdValue'),
+  priorCenterValue: document.querySelector('#priorCenterValue'),
+  priorLossValue: document.querySelector('#priorLossValue'),
+  priorWeightValue: document.querySelector('#priorWeightValue'),
   pdPxValue: document.querySelector('#pdPxValue'),
   irisPxValue: document.querySelector('#irisPxValue'),
   irisDiffValue: document.querySelector('#irisDiffValue'),
@@ -43,6 +49,7 @@ const elements = {
   qualityScoreValue: document.querySelector('#qualityScoreValue'),
   messageBox: document.querySelector('#messageBox'),
   irisReferenceInput: document.querySelector('#irisReferenceInput'),
+  priorStrengthInput: document.querySelector('#priorStrengthInput'),
   maxYawInput: document.querySelector('#maxYawInput'),
   maxPitchInput: document.querySelector('#maxPitchInput'),
   maxRollInput: document.querySelector('#maxRollInput'),
@@ -135,6 +142,7 @@ async function initializeModel() {
 function getConfig() {
   return {
     irisReferenceMm: Number(elements.irisReferenceInput.value) || 11.7,
+    priorStrength: Math.min(1, Math.max(0, Number(elements.priorStrengthInput.value) || 0)),
     maxYaw: Number(elements.maxYawInput.value) || 6,
     maxPitch: Number(elements.maxPitchInput.value) || 7,
     maxRoll: Number(elements.maxRollInput.value) || 5,
@@ -153,6 +161,19 @@ function getConfig() {
     max2D3DDisagreementRatio: 0.10,
     warn2D3DDisagreementRatio: 0.06,
   };
+}
+
+function getSelectedSex() {
+  return elements.sexInput.value;
+}
+
+function updateSexPriorHint() {
+  const prior = SEX_PD_PRIORS[getSelectedSex()];
+  if (!prior) {
+    elements.sexPriorHint.textContent = '성별 분포를 선택하면 중심값 기반 soft prior를 적용합니다.';
+    return;
+  }
+  elements.sexPriorHint.textContent = `${prior.label} 기준 ${prior.minMm}–${prior.maxMm}mm · 중심 ${prior.centerMm}mm · 범위 끝에서 loss 1.0`;
 }
 
 async function requestHighResolutionCamera() {
@@ -424,7 +445,7 @@ function setCheck(element, ok, text) {
 }
 
 function syncCaptureButton() {
-  elements.captureButton.disabled = !cameraStream || autoCaptureInProgress;
+  elements.captureButton.disabled = !cameraStream || !getSelectedSex() || autoCaptureInProgress;
   elements.captureButton.classList.toggle('armed', captureArmed);
 
   if (autoCaptureInProgress) {
@@ -462,6 +483,10 @@ function resetLiveGate(message, { preserveArm = false } = {}) {
 function toggleAutoCapture() {
   if (!cameraStream || autoCaptureInProgress) {
     setMessage('먼저 카메라를 시작하세요.', 'danger');
+    return;
+  }
+  if (!getSelectedSex()) {
+    setMessage('촬영 전에 성별을 선택하세요.', 'danger');
     return;
   }
 
@@ -541,6 +566,11 @@ async function decodeImageFile(file) {
 
 async function loadFile(file) {
   if (!file) return;
+  if (!getSelectedSex()) {
+    setMessage('사진 분석 전에 성별을 선택하세요.', 'danger');
+    elements.galleryInput.value = '';
+    return;
+  }
   let source = null;
   try {
     source = await decodeImageFile(file);
@@ -568,6 +598,11 @@ async function loadFile(file) {
 
 async function analyzeCanvas(canvas, { strictCapture }) {
   if (!faceLandmarker) return;
+  const selectedSex = getSelectedSex();
+  if (!selectedSex) {
+    setMessage('분석 전에 성별을 선택하세요.', 'danger');
+    return;
+  }
   const wasLivePaused = livePaused;
   livePaused = true;
   setStatus(elements.qualityBadge, '분석 중', 'pending');
@@ -588,7 +623,14 @@ async function analyzeCanvas(canvas, { strictCapture }) {
       height: canvas.height,
       irisReferenceMm: getConfig().irisReferenceMm,
     });
-    const quality = evaluateQuality(measurement, getConfig());
+    const config = getConfig();
+    const quality = evaluateQuality(measurement, config);
+    const sexPrior = applySexPdPrior({
+      rawPdMm: measurement.pdMm,
+      sex: selectedSex,
+      qualityScore: quality.score,
+      strength: config.priorStrength,
+    });
 
     if (strictCapture && !quality.accepted) {
       resetMetrics();
@@ -599,11 +641,14 @@ async function analyzeCanvas(canvas, { strictCapture }) {
 
     lastAnalysisSource = canvas;
     renderResult(canvas, landmarks, measurement, quality);
-    updateMetrics(canvas, measurement, quality);
+    updateMetrics(canvas, measurement, quality, sexPrior);
     setStatus(elements.qualityBadge, quality.accepted ? '측정 가능' : '재촬영 권장', quality.accepted ? 'success' : 'danger');
+    const priorSummary = sexPrior.withinTypicalRange
+      ? `${sexPrior.label} 분포 안 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`
+      : `${sexPrior.label} 기준 ${sexPrior.minMm}–${sexPrior.maxMm}mm 밖 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`;
     setMessage(
-      quality.accepted ? '품질 조건을 통과했습니다.' : quality.reasons.join(' · '),
-      quality.accepted ? 'success' : 'danger',
+      quality.accepted ? `품질 조건을 통과했습니다. ${priorSummary}` : `${quality.reasons.join(' · ')} · ${priorSummary}`,
+      quality.accepted ? (sexPrior.withinTypicalRange ? 'success' : 'warning') : 'danger',
     );
   } catch (error) {
     console.error(error);
@@ -657,8 +702,12 @@ function drawPoint(context, point, color, radius) {
   context.fill();
 }
 
-function updateMetrics(canvas, measurement, quality) {
-  elements.pdValue.textContent = measurement.pdMm.toFixed(1);
+function updateMetrics(canvas, measurement, quality, sexPrior) {
+  elements.pdValue.textContent = sexPrior.adjustedPdMm.toFixed(1);
+  elements.rawPdValue.textContent = `${measurement.pdMm.toFixed(1)} mm`;
+  elements.priorCenterValue.textContent = `${sexPrior.label} ${sexPrior.minMm}–${sexPrior.maxMm}mm · 중심 ${sexPrior.centerMm}mm`;
+  elements.priorLossValue.textContent = `${sexPrior.priorLoss.toFixed(2)} (${Math.abs(sexPrior.normalizedDistance).toFixed(2)}× 반폭)`;
+  elements.priorWeightValue.textContent = `${(sexPrior.priorWeight * 100).toFixed(1)}% · 측정 σ≈${sexPrior.measurementSigmaMm.toFixed(1)}mm`;
   elements.pdPxValue.textContent = `${measurement.pdPx.toFixed(1)} px`;
   elements.irisPxValue.textContent = `${measurement.meanIrisPx.toFixed(1)} px`;
   elements.irisDiffValue.textContent = `${(measurement.irisDifferenceRatio * 100).toFixed(1)}%`;
@@ -678,6 +727,10 @@ function updateMetrics(canvas, measurement, quality) {
 
 function resetMetrics() {
   elements.pdValue.textContent = '--';
+  elements.rawPdValue.textContent = '-- mm';
+  elements.priorCenterValue.textContent = '--';
+  elements.priorLossValue.textContent = '--';
+  elements.priorWeightValue.textContent = '--';
   elements.pdPxValue.textContent = '-- px';
   elements.irisPxValue.textContent = '-- px';
   elements.irisDiffValue.textContent = '--';
@@ -694,9 +747,18 @@ async function reanalyzeLastImage() {
   if (lastAnalysisSource) await analyzeCanvas(lastAnalysisSource, { strictCapture: false });
 }
 
-for (const input of [elements.irisReferenceInput, elements.maxYawInput, elements.maxPitchInput, elements.maxRollInput]) {
+for (const input of [elements.irisReferenceInput, elements.priorStrengthInput, elements.maxYawInput, elements.maxPitchInput, elements.maxRollInput]) {
   input.addEventListener('change', reanalyzeLastImage);
 }
+
+
+elements.sexInput.addEventListener('change', () => {
+  updateSexPriorHint();
+  captureArmed = false;
+  validHoldStartedAt = null;
+  syncCaptureButton();
+  void reanalyzeLastImage();
+});
 
 elements.startCameraButton.addEventListener('click', startCamera);
 elements.stopCameraButton.addEventListener('click', stopCamera);
@@ -704,4 +766,5 @@ elements.captureButton.addEventListener('click', toggleAutoCapture);
 elements.galleryInput.addEventListener('change', (event) => loadFile(event.target.files?.[0]));
 window.addEventListener('pagehide', stopCamera);
 
+updateSexPriorHint();
 initializeModel();
