@@ -97,7 +97,7 @@ footer { color: #718096; font-size: 12px; text-align: center; padding: 18px 0 0;
   .app-shell { width: min(100% - 14px, 1180px); }
   .capture-panel, .result-panel, .settings-panel { padding: 12px; }
   .media-stage { min-height: 300px; max-height: 68vh; border-radius: 16px; }
-  .face-guide { width: min(66%, 295px); }
+  .face-guide { width: min(58%, 265px); }
   .subject-input-row { grid-template-columns: 1fr; }
   .button-row { grid-template-columns: 1fr; }
   .button { min-height: 54px; }
