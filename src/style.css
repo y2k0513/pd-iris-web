@@ -1,0 +1,90 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, Pretendard, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #07111f;
+  color: #f8fafc;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at top, #16263d 0, #07111f 42rem); }
+button, input { font: inherit; }
+button { color: inherit; }
+
+.app-shell { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 42px 0 30px; }
+.hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 26px; }
+.eyebrow { margin: 0 0 8px; color: #84caff; font-size: 12px; font-weight: 800; letter-spacing: .12em; }
+h1 { margin: 0; font-size: clamp(30px, 6vw, 52px); letter-spacing: -.04em; }
+.hero-copy { max-width: 700px; margin: 14px 0 0; color: #aebbd0; line-height: 1.65; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(340px, .95fr); gap: 18px; }
+.panel { border: 1px solid rgba(255,255,255,.1); border-radius: 22px; background: rgba(14, 27, 45, .86); box-shadow: 0 18px 60px rgba(0,0,0,.22); overflow: hidden; }
+.capture-panel, .result-panel, .settings-panel { padding: 20px; }
+.panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 16px; }
+.panel-heading > div { display: flex; align-items: center; gap: 10px; }
+.panel-heading h2 { margin: 0; font-size: 18px; }
+.panel-heading.compact { margin-bottom: 14px; }
+.step { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 9px; background: #1570ef; font-weight: 800; }
+.muted { color: #98a6bb; font-size: 13px; }
+
+.status-pill { flex: none; border-radius: 999px; padding: 7px 11px; font-size: 12px; font-weight: 800; border: 1px solid transparent; }
+.status-pill.pending { color: #fec84b; background: rgba(247,144,9,.12); border-color: rgba(247,144,9,.28); }
+.status-pill.success { color: #6ce9a6; background: rgba(18,183,106,.13); border-color: rgba(18,183,106,.3); }
+.status-pill.danger { color: #fda29b; background: rgba(240,68,56,.13); border-color: rgba(240,68,56,.3); }
+.status-pill.neutral { color: #b9c4d5; background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.1); }
+
+.media-stage, .result-visual { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 16px; background: #030a13; border: 1px solid rgba(255,255,255,.08); }
+.media-stage video, .media-stage canvas, .result-visual canvas { width: 100%; height: 100%; object-fit: contain; }
+.media-stage video { transform: scaleX(-1); }
+.empty-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; text-align: center; padding: 24px; color: #d0d8e5; }
+.empty-state span { color: #8492a8; font-size: 13px; }
+.face-guide { width: min(45%, 180px); aspect-ratio: .74; border: 2px dashed rgba(132,202,255,.7); border-radius: 46%; margin-bottom: 8px; }
+
+.button-row { display: grid; grid-template-columns: 1.2fr .8fr 1fr; gap: 9px; margin-top: 14px; }
+.button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; border: 1px solid rgba(255,255,255,.13); border-radius: 12px; background: #1c2d44; cursor: pointer; font-weight: 750; transition: transform .14s ease, background .14s ease; }
+.button:hover:not(:disabled) { transform: translateY(-1px); background: #263b57; }
+.button.primary { background: #1570ef; border-color: #1570ef; }
+.button.primary:hover { background: #175cd3; }
+.button:disabled { opacity: .45; cursor: not-allowed; }
+.file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.privacy-note { margin: 12px 2px 0; color: #7f8da3; font-size: 12px; }
+
+.result-placeholder { position: absolute; padding: 26px; color: #7f8da3; text-align: center; }
+.result-visual canvas[hidden] { display: none; }
+.pd-card { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center; margin-top: 14px; padding: 16px; border-radius: 15px; background: linear-gradient(135deg, rgba(21,112,239,.2), rgba(0,188,212,.09)); border: 1px solid rgba(132,202,255,.18); }
+.pd-card > span { color: #c9d4e3; font-weight: 700; }
+.pd-card strong { font-size: 28px; }
+.pd-card small { grid-column: 1 / -1; color: #8291a7; }
+.message-box { margin-top: 12px; padding: 12px 13px; border-radius: 12px; font-size: 13px; line-height: 1.5; }
+.message-box.info { background: rgba(46,144,250,.11); color: #b2ddff; }
+.message-box.success { background: rgba(18,183,106,.12); color: #a6f4c5; }
+.message-box.warning { background: rgba(247,144,9,.12); color: #fedf89; }
+.message-box.danger { background: rgba(240,68,56,.12); color: #fecdca; }
+.metrics { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; margin: 14px 0 0; }
+.metrics div { padding: 11px 12px; border-radius: 12px; background: rgba(255,255,255,.045); }
+.metrics dt { color: #8190a6; font-size: 11px; }
+.metrics dd { margin: 5px 0 0; font-size: 13px; font-weight: 750; }
+
+.settings-panel { margin-top: 18px; }
+.settings-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.settings-grid label { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 13px; background: rgba(255,255,255,.04); color: #9facbe; font-size: 12px; }
+.settings-grid label span { display: flex; align-items: center; gap: 6px; color: #dbe4f0; }
+.settings-grid input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid rgba(255,255,255,.11); border-radius: 9px; background: #0a1626; color: #fff; }
+footer { color: #718096; font-size: 12px; text-align: center; padding: 18px 0 0; }
+
+@media (max-width: 850px) {
+  .app-shell { padding-top: 24px; }
+  .hero { flex-direction: column; gap: 14px; }
+  .grid { grid-template-columns: 1fr; }
+  .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 520px) {
+  .app-shell { width: min(100% - 18px, 1180px); }
+  .capture-panel, .result-panel, .settings-panel { padding: 14px; }
+  .button-row { grid-template-columns: 1fr 1fr; }
+  .file-button { grid-column: 1 / -1; }
+  .metrics { grid-template-columns: 1fr; }
+  .settings-grid { grid-template-columns: 1fr 1fr; }
+}

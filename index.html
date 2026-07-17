@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#101828" />
+    <title>홍채 기준 PD 추정</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">ON-DEVICE · NO API KEY</p>
+          <h1>홍채 기준 PD 추정</h1>
+          <p class="hero-copy">MediaPipe가 홍채 중심과 경계를 찾고, 홍채 지름을 11.7mm로 가정해 동공간 거리를 근사합니다.</p>
+        </div>
+        <div id="modelStatus" class="status-pill pending">모델 준비 중</div>
+      </header>
+
+      <section class="grid">
+        <article class="panel capture-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="step">1</span>
+              <h2>사진 준비</h2>
+            </div>
+            <span id="cameraMeta" class="muted">카메라 미실행</span>
+          </div>
+
+          <div class="media-stage" id="mediaStage">
+            <video id="video" autoplay playsinline muted hidden></video>
+            <canvas id="captureCanvas" hidden></canvas>
+            <div id="emptyState" class="empty-state">
+              <div class="face-guide" aria-hidden="true"></div>
+              <strong>정면에서 렌즈를 바라보세요</strong>
+              <span>약 30cm 거리 · 밝은 조명 · 안경 반사 최소화</span>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button id="startCameraButton" class="button primary" type="button">카메라 시작</button>
+            <button id="captureButton" class="button" type="button" disabled>촬영</button>
+            <label class="button file-button">
+              사진 선택
+              <input id="fileInput" type="file" accept="image/*" capture="user" />
+            </label>
+          </div>
+          <p class="privacy-note">사진은 브라우저 안에서만 처리되며 서버로 전송하지 않습니다.</p>
+        </article>
+
+        <article class="panel result-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="step">2</span>
+              <h2>분석 결과</h2>
+            </div>
+            <span id="qualityBadge" class="status-pill neutral">대기</span>
+          </div>
+
+          <div class="result-visual">
+            <canvas id="resultCanvas"></canvas>
+            <div id="resultPlaceholder" class="result-placeholder">촬영하거나 사진을 선택하면 랜드마크를 표시합니다.</div>
+          </div>
+
+          <div class="pd-card">
+            <span>추정 양안 PD</span>
+            <strong><span id="pdValue">--</span> mm</strong>
+            <small>처방용 실측값이 아닌 평균 홍채 지름 기반 추정값</small>
+          </div>
+
+          <div id="messageBox" class="message-box info">모델이 준비되면 사진을 분석할 수 있습니다.</div>
+
+          <dl class="metrics">
+            <div><dt>눈 사이 거리</dt><dd id="pdPxValue">-- px</dd></div>
+            <div><dt>평균 홍채 지름</dt><dd id="irisPxValue">-- px</dd></div>
+            <div><dt>좌/우 홍채 차이</dt><dd id="irisDiffValue">--</dd></div>
+            <div><dt>Yaw / Pitch / Roll</dt><dd id="poseValue">--</dd></div>
+            <div><dt>분석 해상도</dt><dd id="resolutionValue">--</dd></div>
+            <div><dt>촬영 품질 점수</dt><dd id="qualityScoreValue">--</dd></div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="panel settings-panel">
+        <div class="panel-heading compact">
+          <div>
+            <span class="step">3</span>
+            <h2>측정 설정</h2>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <label>
+            기준 홍채 지름
+            <span><input id="irisReferenceInput" type="number" min="9" max="14" step="0.1" value="11.7" /> mm</span>
+          </label>
+          <label>
+            최대 Yaw
+            <span><input id="maxYawInput" type="number" min="1" max="30" step="1" value="8" />°</span>
+          </label>
+          <label>
+            최대 Pitch
+            <span><input id="maxPitchInput" type="number" min="1" max="30" step="1" value="8" />°</span>
+          </label>
+          <label>
+            최대 Roll
+            <span><input id="maxRollInput" type="number" min="1" max="30" step="1" value="5" />°</span>
+          </label>
+        </div>
+      </section>
+
+      <footer>
+        <p>홍채 실제 크기의 개인차와 촬영 자세 때문에 수 mm 오차가 발생할 수 있습니다.</p>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

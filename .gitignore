@@ -1,0 +1,5 @@
+node_modules/
+dist/
+public/wasm/
+public/models/face_landmarker.task
+.DS_Store
