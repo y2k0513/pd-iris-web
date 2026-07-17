@@ -51,6 +51,7 @@ h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); line-height: 1.05; }
 .button:hover:not(:disabled) { transform: translateY(-1px); background: #263b57; }
 .button.primary { background: #1570ef; border-color: #1570ef; }
 .button.capture-ready:not(:disabled) { background: #12b76a; border-color: #12b76a; }
+.button.capture-ready.armed:not(:disabled) { background: #f79009; border-color: #f79009; }
 .button.subtle { background: #101d2e; }
 .button:disabled { cursor: not-allowed; opacity: .42; }
 .file-button { position: relative; }

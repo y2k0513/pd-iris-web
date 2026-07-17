@@ -5,8 +5,9 @@ import { evaluateQuality, measurePd } from './measurement.js';
 const OFFICIAL_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
 const LIVE_INTERVAL_MS = 170;
-const STABLE_FRAME_TARGET = 5;
-const MAX_PD_VARIATION_RATIO = 0.018;
+const STABLE_FRAME_TARGET = 4;
+const MAX_PD_VARIATION_RATIO = 0.025;
+const AUTO_CAPTURE_DELAY_MS = 1000;
 
 const elements = {
   mediaStage: document.querySelector('#mediaStage'),
@@ -59,6 +60,9 @@ let stableFrames = 0;
 let pdHistory = [];
 let latestLiveState = null;
 let lastAnalysisSource = null;
+let captureArmed = false;
+let validHoldStartedAt = null;
+let autoCaptureInProgress = false;
 
 function setStatus(element, text, kind) {
   element.textContent = text;
@@ -131,23 +135,23 @@ async function initializeModel() {
 function getConfig() {
   return {
     irisReferenceMm: Number(elements.irisReferenceInput.value) || 11.7,
-    maxYaw: Number(elements.maxYawInput.value) || 4,
-    maxPitch: Number(elements.maxPitchInput.value) || 5,
-    maxRoll: Number(elements.maxRollInput.value) || 3,
+    maxYaw: Number(elements.maxYawInput.value) || 6,
+    maxPitch: Number(elements.maxPitchInput.value) || 7,
+    maxRoll: Number(elements.maxRollInput.value) || 5,
     requirePose: true,
-    maxIrisDifferenceRatio: 0.08,
-    minIrisPixels: 16,
-    minFaceHeightRatio: 0.48,
-    maxFaceHeightRatio: 0.76,
-    maxFaceCenterOffsetX: 0.07,
-    maxFaceCenterOffsetY: 0.09,
-    maxGazeOffset: 0.22,
-    minEyeOpeningRatio: 0.075,
-    maxPerspectiveAsymmetryRatio: 0.12,
-    maxEyeWidthDifferenceRatio: 0.16,
-    maxIrisDepthDifference: 0.018,
-    max2D3DDisagreementRatio: 0.07,
-    warn2D3DDisagreementRatio: 0.04,
+    maxIrisDifferenceRatio: 0.10,
+    minIrisPixels: 14,
+    minFaceHeightRatio: 0.43,
+    maxFaceHeightRatio: 0.80,
+    maxFaceCenterOffsetX: 0.10,
+    maxFaceCenterOffsetY: 0.12,
+    maxGazeOffset: 0.28,
+    minEyeOpeningRatio: 0.06,
+    maxPerspectiveAsymmetryRatio: 0.16,
+    maxEyeWidthDifferenceRatio: 0.20,
+    maxIrisDepthDifference: 0.025,
+    max2D3DDisagreementRatio: 0.10,
+    warn2D3DDisagreementRatio: 0.06,
   };
 }
 
@@ -233,6 +237,8 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  autoCaptureInProgress = false;
+  livePaused = false;
   if (animationFrameId) cancelAnimationFrame(animationFrameId);
   animationFrameId = null;
   cameraStream?.getTracks().forEach((track) => track.stop());
@@ -262,10 +268,10 @@ function runLiveLoop() {
     try {
       await setModelMode('VIDEO');
       const result = faceLandmarker.detectForVideo(elements.cameraVideo, timestamp);
-      processLiveResult(result);
+      processLiveResult(result, timestamp);
     } catch (error) {
       console.error('Live analysis failed', error);
-      resetLiveGate('실시간 분석 오류');
+      resetLiveGate('실시간 분석 오류', { preserveArm: true });
     } finally {
       liveBusy = false;
     }
@@ -279,9 +285,12 @@ function variationRatio(values) {
   return (Math.max(...values) - Math.min(...values)) / mean;
 }
 
-function processLiveResult(result) {
+function processLiveResult(result, timestamp = performance.now()) {
   if (result.faceLandmarks.length !== 1) {
-    resetLiveGate(result.faceLandmarks.length === 0 ? '얼굴을 찾는 중' : '한 명만 화면에 나오게 하세요');
+    resetLiveGate(
+      result.faceLandmarks.length === 0 ? '얼굴을 찾는 중' : '한 명만 화면에 나오게 하세요',
+      { preserveArm: true },
+    );
     return;
   }
 
@@ -299,43 +308,75 @@ function processLiveResult(result) {
 
   if (quality.accepted) {
     pdHistory.push(measurement.pdMm);
-    if (pdHistory.length > STABLE_FRAME_TARGET) pdHistory.shift();
-    const variation = variationRatio(pdHistory);
-    if (pdHistory.length >= STABLE_FRAME_TARGET && variation <= MAX_PD_VARIATION_RATIO) {
-      stableFrames = Math.min(STABLE_FRAME_TARGET, stableFrames + 1);
-    } else if (pdHistory.length >= STABLE_FRAME_TARGET) {
-      stableFrames = 0;
+    if (pdHistory.length > STABLE_FRAME_TARGET + 2) pdHistory.shift();
+
+    let variation = variationRatio(pdHistory);
+    const variationAccepted = pdHistory.length < 3 || variation <= MAX_PD_VARIATION_RATIO;
+
+    if (!variationAccepted) {
+      pdHistory = [measurement.pdMm];
+      stableFrames = 1;
+      validHoldStartedAt = null;
+      variation = Number.POSITIVE_INFINITY;
     } else {
-      stableFrames = pdHistory.length;
+      stableFrames = Math.min(STABLE_FRAME_TARGET, pdHistory.length);
     }
 
-    const ready = stableFrames >= STABLE_FRAME_TARGET && variation <= MAX_PD_VARIATION_RATIO;
-    latestLiveState = { measurement, quality, landmarks, ready, variation };
-    updateLiveIndicators(measurement, quality, ready, variation);
+    const ready = pdHistory.length >= STABLE_FRAME_TARGET
+      && variationRatio(pdHistory) <= MAX_PD_VARIATION_RATIO;
+
+    latestLiveState = {
+      measurement,
+      quality,
+      landmarks,
+      ready,
+      variation: variationRatio(pdHistory),
+    };
+
+    let remainingMs = null;
+    if (captureArmed) {
+      if (validHoldStartedAt === null) validHoldStartedAt = timestamp;
+      remainingMs = Math.max(0, AUTO_CAPTURE_DELAY_MS - (timestamp - validHoldStartedAt));
+
+      if (remainingMs <= 0 && ready && !autoCaptureInProgress) {
+        autoCaptureInProgress = true;
+        captureArmed = false;
+        syncCaptureButton();
+        updateLiveIndicators(measurement, quality, ready, variationRatio(pdHistory), 0);
+        void captureCurrentFrame();
+        return;
+      }
+    } else {
+      validHoldStartedAt = null;
+    }
+
+    updateLiveIndicators(measurement, quality, ready, variationRatio(pdHistory), remainingMs);
   } else {
     latestLiveState = { measurement, quality, landmarks, ready: false, variation: Number.NaN };
     stableFrames = 0;
     pdHistory = [];
-    updateLiveIndicators(measurement, quality, false, Number.NaN);
+    validHoldStartedAt = null;
+    updateLiveIndicators(measurement, quality, false, Number.NaN, null);
   }
 }
 
-function updateLiveIndicators(measurement, quality, ready, variation) {
+function updateLiveIndicators(measurement, quality, ready, variation, remainingMs) {
+  const config = getConfig();
   const { pose, eyeAndPerspective } = measurement;
   const poseOk = [pose.yaw, pose.pitch, pose.roll].every(Number.isFinite)
-    && Math.abs(pose.yaw) <= getConfig().maxYaw
-    && Math.abs(pose.pitch) <= getConfig().maxPitch
-    && Math.abs(pose.roll) <= getConfig().maxRoll;
-  const perspectiveOk = eyeAndPerspective.perspectiveAsymmetryRatio <= getConfig().maxPerspectiveAsymmetryRatio
-    && measurement.irisDifferenceRatio <= getConfig().maxIrisDifferenceRatio
-    && measurement.depthAware.disagreementRatio <= getConfig().max2D3DDisagreementRatio;
-  const gazeOk = eyeAndPerspective.gazeOffset <= getConfig().maxGazeOffset;
+    && Math.abs(pose.yaw) <= config.maxYaw
+    && Math.abs(pose.pitch) <= config.maxPitch
+    && Math.abs(pose.roll) <= config.maxRoll;
+  const perspectiveOk = eyeAndPerspective.perspectiveAsymmetryRatio <= config.maxPerspectiveAsymmetryRatio
+    && measurement.irisDifferenceRatio <= config.maxIrisDifferenceRatio
+    && measurement.depthAware.disagreementRatio <= config.max2D3DDisagreementRatio;
+  const gazeOk = eyeAndPerspective.gazeOffset <= config.maxGazeOffset;
 
   setCheck(elements.poseCheck, poseOk, `자세 ${pose.yaw.toFixed(1)}/${pose.pitch.toFixed(1)}/${pose.roll.toFixed(1)}°`);
   setCheck(
     elements.perspectiveCheck,
     perspectiveOk,
-    `원근 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 3D차 ${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}%`,
+    `원근 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 3D검증 ${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}%`,
   );
   setCheck(elements.gazeCheck, gazeOk, `시선 ${(eyeAndPerspective.gazeOffset * 100).toFixed(0)}%`);
   setCheck(
@@ -344,18 +385,36 @@ function updateLiveIndicators(measurement, quality, ready, variation) {
     Number.isFinite(variation) ? `안정성 ${(variation * 100).toFixed(1)}%` : `안정성 ${stableFrames}/${STABLE_FRAME_TARGET}`,
   );
 
-  elements.captureButton.disabled = !ready;
-  elements.captureButton.textContent = ready ? '촬영 및 분석' : `자세 유지 ${stableFrames}/${STABLE_FRAME_TARGET}`;
+  syncCaptureButton();
+
+  if (!quality.accepted) {
+    elements.liveGuide.className = 'face-guide live-guide invalid';
+    const reason = quality.reasons[0] || '자세를 다시 맞추세요';
+    elements.liveStatus.textContent = captureArmed
+      ? `${reason} · 맞추면 1초 카운트 재시작`
+      : reason;
+    return;
+  }
+
+  if (captureArmed) {
+    if (remainingMs !== null) {
+      elements.liveGuide.className = ready
+        ? 'face-guide live-guide ready'
+        : 'face-guide live-guide checking';
+      elements.liveStatus.textContent = `자세 유지 — ${(remainingMs / 1000).toFixed(1)}초 후 자동촬영`;
+    } else {
+      elements.liveGuide.className = 'face-guide live-guide checking';
+      elements.liveStatus.textContent = '움직이지 말고 자세를 유지하세요';
+    }
+    return;
+  }
 
   if (ready) {
     elements.liveGuide.className = 'face-guide live-guide ready';
-    elements.liveStatus.textContent = '촬영 가능 — 자세를 유지하세요';
-  } else if (quality.accepted) {
-    elements.liveGuide.className = 'face-guide live-guide checking';
-    elements.liveStatus.textContent = `좋습니다. 움직이지 마세요 (${stableFrames}/${STABLE_FRAME_TARGET})`;
+    elements.liveStatus.textContent = '자세 양호 — 촬영 준비 버튼을 누르세요';
   } else {
-    elements.liveGuide.className = 'face-guide live-guide invalid';
-    elements.liveStatus.textContent = quality.reasons[0] || '자세를 다시 맞추세요';
+    elements.liveGuide.className = 'face-guide live-guide checking';
+    elements.liveStatus.textContent = `좋습니다. 잠시 자세를 유지하세요 (${stableFrames}/${STABLE_FRAME_TARGET})`;
   }
 }
 
@@ -364,14 +423,30 @@ function setCheck(element, ok, text) {
   element.className = ok ? 'ok' : 'bad';
 }
 
-function resetLiveGate(message) {
+function syncCaptureButton() {
+  elements.captureButton.disabled = !cameraStream || autoCaptureInProgress;
+  elements.captureButton.classList.toggle('armed', captureArmed);
+
+  if (autoCaptureInProgress) {
+    elements.captureButton.textContent = '촬영 및 분석 중';
+  } else if (captureArmed) {
+    elements.captureButton.textContent = '자동촬영 취소';
+  } else {
+    elements.captureButton.textContent = '촬영 준비';
+  }
+}
+
+function resetLiveGate(message, { preserveArm = false } = {}) {
   stableFrames = 0;
   pdHistory = [];
   latestLiveState = null;
-  elements.captureButton.disabled = true;
-  elements.captureButton.textContent = '자세 확인 후 촬영';
+  validHoldStartedAt = null;
+  if (!preserveArm) captureArmed = false;
+
   elements.liveGuide.className = 'face-guide live-guide waiting';
-  elements.liveStatus.textContent = message;
+  elements.liveStatus.textContent = captureArmed
+    ? `${message} · 조건 충족 후 1초 자동촬영`
+    : message;
   for (const [element, label] of [
     [elements.poseCheck, '자세 --'],
     [elements.perspectiveCheck, '원근 --'],
@@ -381,32 +456,67 @@ function resetLiveGate(message) {
     element.textContent = label;
     element.className = '';
   }
+  syncCaptureButton();
+}
+
+function toggleAutoCapture() {
+  if (!cameraStream || autoCaptureInProgress) {
+    setMessage('먼저 카메라를 시작하세요.', 'danger');
+    return;
+  }
+
+  captureArmed = !captureArmed;
+  validHoldStartedAt = null;
+
+  if (captureArmed) {
+    setMessage('자세 조건을 맞춘 채 유지하면 1초 뒤 자동으로 촬영합니다.', 'info');
+    elements.liveStatus.textContent = '얼굴을 맞추세요 — 조건 충족 후 1초 자동촬영';
+  } else {
+    setMessage('자동촬영을 취소했습니다.', 'info');
+    elements.liveStatus.textContent = latestLiveState?.ready
+      ? '자세 양호 — 촬영 준비 버튼을 누르세요'
+      : '촬영 준비 버튼을 누른 뒤 자세를 맞추세요';
+  }
+
+  syncCaptureButton();
 }
 
 async function captureCurrentFrame() {
   if (!cameraStream || !latestLiveState?.ready) {
-    setMessage('자세 조건을 모두 통과해야 촬영할 수 있습니다.', 'danger');
+    autoCaptureInProgress = false;
+    captureArmed = true;
+    validHoldStartedAt = null;
+    syncCaptureButton();
+    setMessage('촬영 직전 자세가 흔들렸습니다. 자세를 다시 유지하세요.', 'warning');
     return;
   }
 
   livePaused = true;
-  elements.captureButton.disabled = true;
-  const width = elements.cameraVideo.videoWidth;
-  const height = elements.cameraVideo.videoHeight;
-  const canvas = elements.captureCanvas;
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  context.save();
-  context.translate(width, 0);
-  context.scale(-1, 1);
-  context.drawImage(elements.cameraVideo, 0, 0, width, height);
-  context.restore();
+  autoCaptureInProgress = true;
+  captureArmed = false;
+  validHoldStartedAt = null;
+  syncCaptureButton();
 
-  elements.cameraMeta.textContent = `촬영 · ${width}×${height}`;
-  await analyzeCanvas(canvas, { strictCapture: true });
-  resetLiveGate('다음 촬영을 위해 자세를 다시 맞추세요');
-  livePaused = false;
+  try {
+    const width = elements.cameraVideo.videoWidth;
+    const height = elements.cameraVideo.videoHeight;
+    const canvas = elements.captureCanvas;
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.save();
+    context.translate(width, 0);
+    context.scale(-1, 1);
+    context.drawImage(elements.cameraVideo, 0, 0, width, height);
+    context.restore();
+
+    elements.cameraMeta.textContent = `촬영 · ${width}×${height}`;
+    await analyzeCanvas(canvas, { strictCapture: true });
+  } finally {
+    autoCaptureInProgress = false;
+    resetLiveGate('다음 측정은 촬영 준비 버튼을 누르세요');
+    livePaused = false;
+  }
 }
 
 async function decodeImageFile(file) {
@@ -559,7 +669,7 @@ function updateMetrics(canvas, measurement, quality) {
   const perspective = measurement.eyeAndPerspective;
   elements.perspectiveValue.textContent = `대칭 ${(perspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 시선 ${(perspective.gazeOffset * 100).toFixed(0)}%`;
   elements.depthEstimateValue.textContent = `2D ${measurement.pdMm2D.toFixed(1)} mm · 3D ${measurement.pdMm3D.toFixed(1)} mm`;
-  elements.depthAgreementValue.textContent = `${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}% · 3D 가중치 ${(measurement.depthAware.fusion3DWeight * 100).toFixed(0)}%`;
+  elements.depthAgreementValue.textContent = `${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}% · 최종값 반영 0%`;
   const framing = measurement.framing;
   elements.framingValue.textContent = `얼굴 ${(framing.faceHeightRatio * 100).toFixed(0)}% · 중심 X ${(framing.centerOffsetX * 100).toFixed(0)}% / Y ${(framing.centerOffsetY * 100).toFixed(0)}%`;
   elements.resolutionValue.textContent = `${canvas.width}×${canvas.height}`;
@@ -590,7 +700,7 @@ for (const input of [elements.irisReferenceInput, elements.maxYawInput, elements
 
 elements.startCameraButton.addEventListener('click', startCamera);
 elements.stopCameraButton.addEventListener('click', stopCamera);
-elements.captureButton.addEventListener('click', captureCurrentFrame);
+elements.captureButton.addEventListener('click', toggleAutoCapture);
 elements.galleryInput.addEventListener('change', (event) => loadFile(event.target.files?.[0]));
 window.addEventListener('pagehide', stopCamera);
 

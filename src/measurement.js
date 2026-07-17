@@ -230,9 +230,9 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
   const estimateMean = (pdMm2D + pdMm3D) / 2;
   const disagreementRatio = Math.abs(pdMm3D - pdMm2D) / estimateMean;
 
-  // 상대 z는 유용하지만 센서 기반 metric depth는 아니다. 3D를 주값으로 두되
-  // 2D 값을 보조로 섞어 홍채 z 노이즈가 최종값을 지배하지 않게 한다.
-  const pdMm = pdMm3D * 0.7 + pdMm2D * 0.3;
+  // 최종 PD는 반복성이 더 좋은 2D 홍채 비율값을 사용한다.
+  // 상대 3D 값은 최종값에 섞지 않고 원근/품질 검증에만 사용한다.
+  const pdMm = pdMm2D;
 
   return {
     pdPx,
@@ -250,7 +250,7 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
       rightIris3DUnits,
       meanIris3DUnits,
       disagreementRatio,
-      fusion3DWeight: 0.7,
+      fusion3DWeight: 0,
     },
     pose: extractPoseDegrees(matrix),
     framing: calculateFraming(landmarks),

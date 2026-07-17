@@ -60,7 +60,7 @@ test('iris scale converts pixel PD to millimetres and calculates symmetry', () =
 });
 
 
-test('3D iris ratio changes when relative depth differs', () => {
+test('3D iris ratio is retained for quality checking while final PD stays 2D', () => {
   const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
   const width = 1000;
   const height = 1000;
@@ -78,7 +78,8 @@ test('3D iris ratio changes when relative depth differs', () => {
   const result = measurePd({ landmarks, width, height, irisReferenceMm: 11.7 });
   assert.ok(result.pdMm3D > result.pdMm2D);
   assert.ok(result.depthAware.disagreementRatio > 0);
-  assert.ok(Math.abs(result.pdMm - (result.pdMm3D * 0.7 + result.pdMm2D * 0.3)) < 1e-9);
+  assert.ok(Math.abs(result.pdMm - result.pdMm2D) < 1e-9);
+  assert.equal(result.depthAware.fusion3DWeight, 0);
 });
 
 test('maxPairwiseDistance3D includes z depth', () => {
