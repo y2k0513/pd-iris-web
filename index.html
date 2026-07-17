@@ -22,28 +22,36 @@
           <div class="panel-heading">
             <div>
               <span class="step">1</span>
-              <h2>사진 준비</h2>
+              <h2>사진 촬영</h2>
             </div>
-            <span id="cameraMeta" class="muted">카메라 미실행</span>
+            <span id="cameraMeta" class="muted">촬영 대기</span>
           </div>
 
           <div class="media-stage" id="mediaStage">
-            <video id="video" autoplay playsinline muted hidden></video>
             <canvas id="captureCanvas" hidden></canvas>
             <div id="emptyState" class="empty-state">
-              <div class="face-guide" aria-hidden="true"></div>
-              <strong>정면에서 렌즈를 바라보세요</strong>
-              <span>약 30cm 거리 · 밝은 조명 · 안경 반사 최소화</span>
+              <div class="face-guide" aria-hidden="true">
+                <span class="eye-line"></span>
+              </div>
+              <strong>얼굴을 크게, 정면으로 촬영하세요</strong>
+              <span>얼굴이 안내 프레임의 약 70~90%를 채우도록 맞추세요.</span>
+              <span>약 30cm 거리 · 렌즈 응시 · 밝은 조명 · 안경 반사 최소화</span>
             </div>
           </div>
 
-          <div class="button-row">
-            <button id="startCameraButton" class="button primary" type="button">카메라 시작</button>
-            <button id="captureButton" class="button" type="button" disabled>촬영</button>
-            <label class="button file-button">
-              사진 선택
-              <input id="fileInput" type="file" accept="image/*" capture="user" />
+          <div class="button-row capture-actions">
+            <label class="button primary file-button capture-button">
+              카메라 앱으로 촬영
+              <input id="cameraInput" type="file" accept="image/*" capture="user" />
             </label>
+            <label class="button file-button">
+              앨범에서 선택
+              <input id="galleryInput" type="file" accept="image/*" />
+            </label>
+          </div>
+
+          <div class="web-limit-note">
+            모바일 웹은 기기 카메라 앱 화면 위에 자체 얼굴 프레임을 띄울 수 없습니다. 대신 촬영 후 얼굴 위치와 크기를 자동 검사해 기준에서 벗어나면 재촬영을 요구합니다.
           </div>
           <p class="privacy-note">사진은 브라우저 안에서만 처리되며 서버로 전송하지 않습니다.</p>
         </article>
@@ -58,8 +66,8 @@
           </div>
 
           <div class="result-visual">
-            <canvas id="resultCanvas"></canvas>
-            <div id="resultPlaceholder" class="result-placeholder">촬영하거나 사진을 선택하면 랜드마크를 표시합니다.</div>
+            <canvas id="resultCanvas" hidden></canvas>
+            <div id="resultPlaceholder" class="result-placeholder">촬영하거나 사진을 선택하면 전체 이미지 위에 측정 결과를 표시합니다.</div>
           </div>
 
           <div class="pd-card">
@@ -75,6 +83,7 @@
             <div><dt>평균 홍채 지름</dt><dd id="irisPxValue">-- px</dd></div>
             <div><dt>좌/우 홍채 차이</dt><dd id="irisDiffValue">--</dd></div>
             <div><dt>Yaw / Pitch / Roll</dt><dd id="poseValue">--</dd></div>
+            <div><dt>얼굴 프레이밍</dt><dd id="framingValue">--</dd></div>
             <div><dt>분석 해상도</dt><dd id="resolutionValue">--</dd></div>
             <div><dt>촬영 품질 점수</dt><dd id="qualityScoreValue">--</dd></div>
           </dl>

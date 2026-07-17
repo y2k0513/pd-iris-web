@@ -31,8 +31,6 @@ export function extractPoseDegrees(matrix) {
     return { yaw: Number.NaN, pitch: Number.NaN, roll: Number.NaN };
   }
 
-  // MediaPipe Matrix.data is treated as a flattened 4x4 row-major matrix.
-  // Rotation convention: R = Rz(roll) * Ry(yaw) * Rx(pitch).
   const m = matrix.data;
   const r00 = m[0];
   const r10 = m[4];
@@ -61,6 +59,41 @@ export function extractPoseDegrees(matrix) {
     yaw: yaw * degrees,
     pitch: pitch * degrees,
     roll: roll * degrees,
+  };
+}
+
+export function calculateFraming(landmarks) {
+  const facePoints = landmarks.slice(0, 468);
+  const xs = facePoints.map((point) => point.x).filter(Number.isFinite);
+  const ys = facePoints.map((point) => point.y).filter(Number.isFinite);
+
+  if (!xs.length || !ys.length) {
+    return {
+      faceWidthRatio: Number.NaN,
+      faceHeightRatio: Number.NaN,
+      centerOffsetX: Number.NaN,
+      centerOffsetY: Number.NaN,
+    };
+  }
+
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    centerX,
+    centerY,
+    faceWidthRatio: maxX - minX,
+    faceHeightRatio: maxY - minY,
+    centerOffsetX: Math.abs(centerX - 0.5),
+    centerOffsetY: Math.abs(centerY - 0.5),
   };
 }
 
@@ -99,6 +132,7 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
     meanIrisPx,
     irisDifferenceRatio,
     pose: extractPoseDegrees(matrix),
+    framing: calculateFraming(landmarks),
     points: {
       leftCenter,
       rightCenter,
@@ -113,7 +147,7 @@ export function evaluateQuality(measurement, config) {
   const warnings = [];
   let score = 100;
 
-  const { pose, irisDifferenceRatio, meanIrisPx, pdMm } = measurement;
+  const { pose, irisDifferenceRatio, meanIrisPx, pdMm, framing } = measurement;
   const poseAvailable = [pose.yaw, pose.pitch, pose.roll].every(Number.isFinite);
 
   if (!poseAvailable) {
@@ -139,6 +173,25 @@ export function evaluateQuality(measurement, config) {
   if (meanIrisPx < config.minIrisPixels) {
     reasons.push(`홍채가 너무 작게 촬영됨 (${meanIrisPx.toFixed(1)}px)`);
     score -= 25;
+  }
+
+  if (framing && Number.isFinite(framing.faceHeightRatio)) {
+    if (framing.faceHeightRatio < config.minFaceHeightRatio) {
+      reasons.push(`얼굴이 너무 작음 (${(framing.faceHeightRatio * 100).toFixed(0)}%)`);
+      score -= 20;
+    }
+    if (framing.faceHeightRatio > config.maxFaceHeightRatio) {
+      reasons.push(`얼굴이 프레임에 너무 가까움 (${(framing.faceHeightRatio * 100).toFixed(0)}%)`);
+      score -= 15;
+    }
+    if (framing.centerOffsetX > config.maxFaceCenterOffsetX) {
+      reasons.push('얼굴이 좌우 중앙에서 벗어남');
+      score -= 15;
+    }
+    if (framing.centerOffsetY > config.maxFaceCenterOffsetY) {
+      reasons.push('얼굴이 상하 중앙에서 벗어남');
+      score -= 15;
+    }
   }
 
   if (pdMm < 45 || pdMm > 85) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractPoseDegrees, maxPairwiseDistance, measurePd } from './src/measurement.js';
+import { calculateFraming, extractPoseDegrees, maxPairwiseDistance, measurePd } from './src/measurement.js';
 
 test('maxPairwiseDistance finds circle diameter', () => {
   const points = [{ x: 0, y: -2 }, { x: 2, y: 0 }, { x: 0, y: 2 }, { x: -2, y: 0 }];
@@ -12,6 +12,17 @@ test('identity matrix yields zero pose', () => {
   assert.ok(Math.abs(pose.yaw) < 1e-9);
   assert.ok(Math.abs(pose.pitch) < 1e-9);
   assert.ok(Math.abs(pose.roll) < 1e-9);
+});
+
+test('framing calculates face size and center offsets', () => {
+  const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  landmarks[0] = { x: 0.3, y: 0.2, z: 0 };
+  landmarks[1] = { x: 0.7, y: 0.8, z: 0 };
+  const framing = calculateFraming(landmarks);
+  assert.ok(Math.abs(framing.faceWidthRatio - 0.4) < 1e-9);
+  assert.ok(Math.abs(framing.faceHeightRatio - 0.6) < 1e-9);
+  assert.ok(framing.centerOffsetX < 1e-9);
+  assert.ok(framing.centerOffsetY < 1e-9);
 });
 
 test('iris scale converts pixel PD to millimetres', () => {
