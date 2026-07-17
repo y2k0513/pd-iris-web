@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">ON-DEVICE · NO API KEY</p>
           <h1>홍채 기준 PD 추정</h1>
-          <p class="hero-copy">MediaPipe가 홍채 중심과 경계를 찾고, 홍채 지름을 11.7mm로 가정해 동공간 거리를 근사합니다.</p>
+          <p class="hero-copy">실시간으로 얼굴 자세와 원근 대칭을 검사한 뒤, 안정된 정면 자세에서만 촬영합니다.</p>
         </div>
         <div id="modelStatus" class="status-pill pending">모델 준비 중</div>
       </header>
@@ -22,36 +22,46 @@
           <div class="panel-heading">
             <div>
               <span class="step">1</span>
-              <h2>사진 촬영</h2>
+              <h2>고해상도 촬영</h2>
             </div>
-            <span id="cameraMeta" class="muted">촬영 대기</span>
+            <span id="cameraMeta" class="muted">카메라 대기</span>
           </div>
 
           <div class="media-stage" id="mediaStage">
+            <video id="cameraVideo" autoplay muted playsinline hidden></video>
             <canvas id="captureCanvas" hidden></canvas>
             <div id="emptyState" class="empty-state">
-              <div class="face-guide" aria-hidden="true">
+              <div class="face-guide static-guide" aria-hidden="true"><span class="eye-line"></span></div>
+              <strong>카메라를 시작하세요</strong>
+              <span>브라우저가 지원하는 범위에서 가장 높은 해상도를 요청합니다.</span>
+            </div>
+            <div id="liveOverlay" class="live-overlay" hidden>
+              <div id="liveGuide" class="face-guide live-guide waiting" aria-hidden="true">
                 <span class="eye-line"></span>
               </div>
-              <strong>얼굴을 크게, 정면으로 촬영하세요</strong>
-              <span>얼굴이 안내 프레임의 약 70~90%를 채우도록 맞추세요.</span>
-              <span>약 30cm 거리 · 렌즈 응시 · 밝은 조명 · 안경 반사 최소화</span>
+              <div id="liveStatus" class="live-status">얼굴을 프레임에 맞추세요</div>
             </div>
           </div>
 
+          <div class="live-checks" id="liveChecks">
+            <span id="poseCheck">자세 --</span>
+            <span id="perspectiveCheck">원근 --</span>
+            <span id="gazeCheck">시선 --</span>
+            <span id="stabilityCheck">안정성 --</span>
+          </div>
+
           <div class="button-row capture-actions">
-            <label class="button primary file-button capture-button">
-              카메라 앱으로 촬영
-              <input id="cameraInput" type="file" accept="image/*" capture="user" />
-            </label>
+            <button id="startCameraButton" class="button primary" type="button">카메라 시작</button>
+            <button id="captureButton" class="button capture-ready" type="button" disabled>자세 확인 후 촬영</button>
+            <button id="stopCameraButton" class="button subtle" type="button" disabled>카메라 종료</button>
             <label class="button file-button">
-              앨범에서 선택
+              사진으로 테스트
               <input id="galleryInput" type="file" accept="image/*" />
             </label>
           </div>
 
           <div class="web-limit-note">
-            모바일 웹은 기기 카메라 앱 화면 위에 자체 얼굴 프레임을 띄울 수 없습니다. 대신 촬영 후 얼굴 위치와 크기를 자동 검사해 기준에서 벗어나면 재촬영을 요구합니다.
+            단일 전면 카메라는 실제 깊이를 직접 측정하지 못합니다. 대신 Yaw/Pitch/Roll, 좌우 홍채 크기, 코-눈 거리 대칭, 시선, 프레임 안정성을 동시에 검사해 원근 오차가 큰 촬영을 차단합니다.
           </div>
           <p class="privacy-note">사진은 브라우저 안에서만 처리되며 서버로 전송하지 않습니다.</p>
         </article>
@@ -67,7 +77,7 @@
 
           <div class="result-visual">
             <canvas id="resultCanvas" hidden></canvas>
-            <div id="resultPlaceholder" class="result-placeholder">촬영하거나 사진을 선택하면 전체 이미지 위에 측정 결과를 표시합니다.</div>
+            <div id="resultPlaceholder" class="result-placeholder">자세 조건을 통과한 뒤 촬영하면 전체 이미지와 측정 결과를 표시합니다.</div>
           </div>
 
           <div class="pd-card">
@@ -76,13 +86,14 @@
             <small>처방용 실측값이 아닌 평균 홍채 지름 기반 추정값</small>
           </div>
 
-          <div id="messageBox" class="message-box info">모델이 준비되면 사진을 분석할 수 있습니다.</div>
+          <div id="messageBox" class="message-box info">모델과 카메라를 준비하고 있습니다.</div>
 
           <dl class="metrics">
             <div><dt>눈 사이 거리</dt><dd id="pdPxValue">-- px</dd></div>
             <div><dt>평균 홍채 지름</dt><dd id="irisPxValue">-- px</dd></div>
             <div><dt>좌/우 홍채 차이</dt><dd id="irisDiffValue">--</dd></div>
             <div><dt>Yaw / Pitch / Roll</dt><dd id="poseValue">--</dd></div>
+            <div><dt>원근 대칭 / 시선</dt><dd id="perspectiveValue">--</dd></div>
             <div><dt>얼굴 프레이밍</dt><dd id="framingValue">--</dd></div>
             <div><dt>분석 해상도</dt><dd id="resolutionValue">--</dd></div>
             <div><dt>촬영 품질 점수</dt><dd id="qualityScoreValue">--</dd></div>
@@ -92,34 +103,17 @@
 
       <section class="panel settings-panel">
         <div class="panel-heading compact">
-          <div>
-            <span class="step">3</span>
-            <h2>측정 설정</h2>
-          </div>
+          <div><span class="step">3</span><h2>측정 설정</h2></div>
         </div>
         <div class="settings-grid">
-          <label>
-            기준 홍채 지름
-            <span><input id="irisReferenceInput" type="number" min="9" max="14" step="0.1" value="11.7" /> mm</span>
-          </label>
-          <label>
-            최대 Yaw
-            <span><input id="maxYawInput" type="number" min="1" max="30" step="1" value="8" />°</span>
-          </label>
-          <label>
-            최대 Pitch
-            <span><input id="maxPitchInput" type="number" min="1" max="30" step="1" value="8" />°</span>
-          </label>
-          <label>
-            최대 Roll
-            <span><input id="maxRollInput" type="number" min="1" max="30" step="1" value="5" />°</span>
-          </label>
+          <label>기준 홍채 지름<span><input id="irisReferenceInput" type="number" min="9" max="14" step="0.1" value="11.7" /> mm</span></label>
+          <label>최대 Yaw<span><input id="maxYawInput" type="number" min="1" max="20" step="1" value="4" />°</span></label>
+          <label>최대 Pitch<span><input id="maxPitchInput" type="number" min="1" max="20" step="1" value="5" />°</span></label>
+          <label>최대 Roll<span><input id="maxRollInput" type="number" min="1" max="20" step="1" value="3" />°</span></label>
         </div>
       </section>
 
-      <footer>
-        <p>홍채 실제 크기의 개인차와 촬영 자세 때문에 수 mm 오차가 발생할 수 있습니다.</p>
-      </footer>
+      <footer><p>홍채 실제 크기의 개인차와 단안 카메라의 한계로 수 mm 오차가 발생할 수 있습니다.</p></footer>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

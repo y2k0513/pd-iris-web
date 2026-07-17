@@ -3,6 +3,15 @@ export const LANDMARKS = Object.freeze({
   rightIrisBoundary: [469, 470, 471, 472],
   leftIrisCenter: 473,
   leftIrisBoundary: [474, 475, 476, 477],
+  rightEyeOuter: 33,
+  rightEyeInner: 133,
+  rightEyeUpper: 159,
+  rightEyeLower: 145,
+  leftEyeInner: 362,
+  leftEyeOuter: 263,
+  leftEyeUpper: 386,
+  leftEyeLower: 374,
+  noseTip: 1,
 });
 
 export function toPixel(landmark, width, height) {
@@ -24,6 +33,14 @@ export function maxPairwiseDistance(points) {
     }
   }
   return maximum;
+}
+
+export function projectionFraction(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const denominator = dx * dx + dy * dy;
+  if (!(denominator > 0)) return Number.NaN;
+  return ((point.x - start.x) * dx + (point.y - start.y) * dy) / denominator;
 }
 
 export function extractPoseDegrees(matrix) {
@@ -97,6 +114,51 @@ export function calculateFraming(landmarks) {
   };
 }
 
+function calculateEyeAndPerspectiveMetrics(landmarks, width, height, points) {
+  const rightOuter = toPixel(landmarks[LANDMARKS.rightEyeOuter], width, height);
+  const rightInner = toPixel(landmarks[LANDMARKS.rightEyeInner], width, height);
+  const rightUpper = toPixel(landmarks[LANDMARKS.rightEyeUpper], width, height);
+  const rightLower = toPixel(landmarks[LANDMARKS.rightEyeLower], width, height);
+  const leftInner = toPixel(landmarks[LANDMARKS.leftEyeInner], width, height);
+  const leftOuter = toPixel(landmarks[LANDMARKS.leftEyeOuter], width, height);
+  const leftUpper = toPixel(landmarks[LANDMARKS.leftEyeUpper], width, height);
+  const leftLower = toPixel(landmarks[LANDMARKS.leftEyeLower], width, height);
+  const nose = toPixel(landmarks[LANDMARKS.noseTip], width, height);
+
+  const rightEyeWidth = distance(rightOuter, rightInner);
+  const leftEyeWidth = distance(leftInner, leftOuter);
+  const rightEyeOpeningRatio = distance(rightUpper, rightLower) / rightEyeWidth;
+  const leftEyeOpeningRatio = distance(leftUpper, leftLower) / leftEyeWidth;
+
+  const rightGazePosition = projectionFraction(points.rightCenter, rightOuter, rightInner);
+  const leftGazePosition = projectionFraction(points.leftCenter, leftInner, leftOuter);
+  const gazeOffset = Math.max(
+    Math.abs(rightGazePosition - 0.5),
+    Math.abs(leftGazePosition - 0.5),
+  );
+
+  const noseToRightIris = distance(nose, points.rightCenter);
+  const noseToLeftIris = distance(nose, points.leftCenter);
+  const noseEyeMean = (noseToRightIris + noseToLeftIris) / 2;
+  const perspectiveAsymmetryRatio = Math.abs(noseToRightIris - noseToLeftIris) / noseEyeMean;
+  const eyeWidthDifferenceRatio = Math.abs(rightEyeWidth - leftEyeWidth) / ((rightEyeWidth + leftEyeWidth) / 2);
+  const irisDepthDifference = Math.abs(
+    landmarks[LANDMARKS.leftIrisCenter].z - landmarks[LANDMARKS.rightIrisCenter].z,
+  );
+
+  return {
+    rightGazePosition,
+    leftGazePosition,
+    gazeOffset,
+    rightEyeOpeningRatio,
+    leftEyeOpeningRatio,
+    minEyeOpeningRatio: Math.min(rightEyeOpeningRatio, leftEyeOpeningRatio),
+    perspectiveAsymmetryRatio,
+    eyeWidthDifferenceRatio,
+    irisDepthDifference,
+  };
+}
+
 export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 11.7 }) {
   if (!Array.isArray(landmarks) || landmarks.length < 478) {
     throw new Error('478개 얼굴 랜드마크를 찾지 못했습니다.');
@@ -109,6 +171,7 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
   const leftCenter = toPixel(landmarks[LANDMARKS.leftIrisCenter], width, height);
   const rightBoundary = LANDMARKS.rightIrisBoundary.map((index) => toPixel(landmarks[index], width, height));
   const leftBoundary = LANDMARKS.leftIrisBoundary.map((index) => toPixel(landmarks[index], width, height));
+  const points = { leftCenter, rightCenter, leftBoundary, rightBoundary };
 
   const pdPx = distance(leftCenter, rightCenter);
   const rightIrisPx = maxPairwiseDistance(rightBoundary);
@@ -133,12 +196,8 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
     irisDifferenceRatio,
     pose: extractPoseDegrees(matrix),
     framing: calculateFraming(landmarks),
-    points: {
-      leftCenter,
-      rightCenter,
-      leftBoundary,
-      rightBoundary,
-    },
+    eyeAndPerspective: calculateEyeAndPerspectiveMetrics(landmarks, width, height, points),
+    points,
   };
 }
 
@@ -147,12 +206,20 @@ export function evaluateQuality(measurement, config) {
   const warnings = [];
   let score = 100;
 
-  const { pose, irisDifferenceRatio, meanIrisPx, pdMm, framing } = measurement;
+  const {
+    pose,
+    irisDifferenceRatio,
+    meanIrisPx,
+    pdMm,
+    framing,
+    eyeAndPerspective,
+  } = measurement;
   const poseAvailable = [pose.yaw, pose.pitch, pose.roll].every(Number.isFinite);
 
   if (!poseAvailable) {
-    warnings.push('얼굴 변환행렬을 읽지 못해 자세 검사가 제한됩니다.');
-    score -= 15;
+    if (config.requirePose) reasons.push('얼굴 자세를 계산하지 못함');
+    else warnings.push('얼굴 변환행렬을 읽지 못해 자세 검사가 제한됩니다.');
+    score -= 20;
   } else {
     const poseChecks = [
       ['Yaw', Math.abs(pose.yaw), config.maxYaw],
@@ -160,12 +227,12 @@ export function evaluateQuality(measurement, config) {
       ['Roll', Math.abs(pose.roll), config.maxRoll],
     ];
     for (const [name, value, limit] of poseChecks) {
-      score -= Math.min(18, (value / limit) * 10);
+      score -= Math.min(20, (value / limit) * 10);
       if (value > limit) reasons.push(`${name} ${value.toFixed(1)}°: 정면 기준 초과`);
     }
   }
 
-  score -= Math.min(25, irisDifferenceRatio * 120);
+  score -= Math.min(25, irisDifferenceRatio * 150);
   if (irisDifferenceRatio > config.maxIrisDifferenceRatio) {
     reasons.push(`좌우 홍채 지름 차이 ${(irisDifferenceRatio * 100).toFixed(1)}%`);
   }
@@ -181,16 +248,39 @@ export function evaluateQuality(measurement, config) {
       score -= 20;
     }
     if (framing.faceHeightRatio > config.maxFaceHeightRatio) {
-      reasons.push(`얼굴이 프레임에 너무 가까움 (${(framing.faceHeightRatio * 100).toFixed(0)}%)`);
-      score -= 15;
+      reasons.push(`얼굴이 너무 가까움 (${(framing.faceHeightRatio * 100).toFixed(0)}%)`);
+      score -= 18;
     }
     if (framing.centerOffsetX > config.maxFaceCenterOffsetX) {
-      reasons.push('얼굴이 좌우 중앙에서 벗어남');
+      reasons.push('얼굴을 좌우 중앙에 맞추세요');
       score -= 15;
     }
     if (framing.centerOffsetY > config.maxFaceCenterOffsetY) {
-      reasons.push('얼굴이 상하 중앙에서 벗어남');
+      reasons.push('얼굴을 상하 중앙에 맞추세요');
       score -= 15;
+    }
+  }
+
+  if (eyeAndPerspective) {
+    if (eyeAndPerspective.gazeOffset > config.maxGazeOffset) {
+      reasons.push('화면이 아니라 카메라 렌즈를 바라보세요');
+      score -= 18;
+    }
+    if (eyeAndPerspective.minEyeOpeningRatio < config.minEyeOpeningRatio) {
+      reasons.push('양쪽 눈을 충분히 뜨세요');
+      score -= 15;
+    }
+    if (eyeAndPerspective.perspectiveAsymmetryRatio > config.maxPerspectiveAsymmetryRatio) {
+      reasons.push(`얼굴 원근 비대칭 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}%`);
+      score -= 20;
+    }
+    if (eyeAndPerspective.eyeWidthDifferenceRatio > config.maxEyeWidthDifferenceRatio) {
+      reasons.push(`좌우 눈 크기 비대칭 ${(eyeAndPerspective.eyeWidthDifferenceRatio * 100).toFixed(1)}%`);
+      score -= 14;
+    }
+    if (eyeAndPerspective.irisDepthDifference > config.maxIrisDepthDifference) {
+      warnings.push('좌우 눈의 상대 깊이 차이가 큽니다.');
+      score -= 8;
     }
   }
 
@@ -203,6 +293,5 @@ export function evaluateQuality(measurement, config) {
   }
 
   score = Math.max(0, Math.round(score));
-  const accepted = reasons.length === 0;
-  return { accepted, reasons, warnings, score };
+  return { accepted: reasons.length === 0, reasons, warnings, score };
 }
