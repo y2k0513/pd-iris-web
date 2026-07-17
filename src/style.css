@@ -39,7 +39,7 @@ h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); line-height: 1.05; }
 .empty-state span { max-width: 440px; color: #8492a8; font-size: 13px; line-height: 1.55; }
 .live-overlay { position: absolute; inset: 0; pointer-events: none; display: grid; place-items: center; }
 .live-overlay[hidden] { display: none; }
-.face-guide { position: relative; width: min(68%, 310px); aspect-ratio: .76; border: 3px dashed rgba(132,202,255,.82); border-radius: 47%; box-shadow: 0 0 0 999px rgba(0,0,0,.18); transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.face-guide { position: relative; width: min(62%, 285px); aspect-ratio: .76; border: 3px dashed rgba(132,202,255,.82); border-radius: 47%; box-shadow: 0 0 0 999px rgba(0,0,0,.18); transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
 .static-guide { margin-bottom: 10px; box-shadow: none; }
 .live-guide.waiting { border-color: #84caff; }
 .live-guide.checking { border-color: #fdb022; box-shadow: 0 0 0 999px rgba(0,0,0,.18), 0 0 28px rgba(247,144,9,.24); }
