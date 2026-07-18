@@ -25,9 +25,14 @@ const DEFAULT_OPENCV_URLS = [
 ];
 
 // Pupil segmentation tuning values.
-// Lower percentile keeps only darker pixels as pupil candidates.
-const PUPIL_THRESHOLD_PERCENTILE = 0.20;
-const PUPIL_THRESHOLD_OFFSET = 4;
+// Tone correction uses a dark-side pivot. Pixels farther from the pivot are
+// pushed progressively toward black or white with a sigmoid curve.
+const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
+const PUPIL_TONE_SOFTNESS = 18;
+// A higher binary percentile/offset includes moderately dark pupil pixels,
+// rather than keeping only the very darkest pixels.
+const PUPIL_THRESHOLD_PERCENTILE = 0.34;
+const PUPIL_THRESHOLD_OFFSET = 6;
 const PUPIL_OPEN_KERNEL_SIZE = 3;
 const PUPIL_CLOSE_KERNEL_SIZE = 5;
 const PUPIL_HOLE_MAX_AREA_RATIO = 0.02;
@@ -363,6 +368,40 @@ function gammaCorrect(cv, source, gamma = 0.85) {
   return output;
 }
 
+function collectCircularValues(mat, center, radius) {
+  const values = [];
+  const pixels = mat.data;
+  const xStart = Math.max(0, Math.floor(center.x - radius));
+  const xEnd = Math.min(mat.cols - 1, Math.ceil(center.x + radius));
+  const yStart = Math.max(0, Math.floor(center.y - radius));
+  const yEnd = Math.min(mat.rows - 1, Math.ceil(center.y + radius));
+
+  for (let y = yStart; y <= yEnd; y += 1) {
+    for (let x = xStart; x <= xEnd; x += 1) {
+      if (Math.hypot(x - center.x, y - center.y) <= radius) {
+        values.push(pixels[y * mat.cols + x]);
+      }
+    }
+  }
+  return values;
+}
+
+function pivotContrast(cv, source, pivot, softness = PUPIL_TONE_SOFTNESS) {
+  if (typeof cv.LUT !== 'function') return source.clone();
+  const safeSoftness = Math.max(1, softness);
+  const lut = new cv.Mat(1, 256, cv.CV_8UC1);
+  for (let index = 0; index < 256; index += 1) {
+    // Sigmoid contrast: the pivot maps near mid-gray. Values increasingly
+    // farther below/above it converge smoothly toward black/white.
+    const mapped = 255 / (1 + Math.exp(-(index - pivot) / safeSoftness));
+    lut.data[index] = clamp(Math.round(mapped), 0, 255);
+  }
+  const output = new cv.Mat();
+  cv.LUT(source, lut, output);
+  lut.delete();
+  return output;
+}
+
 function cloneCanvas(sourceCanvas) {
   const canvas = document.createElement('canvas');
   canvas.width = sourceCanvas.width;
@@ -518,8 +557,17 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
     gray = new cv.Mat();
     cv.cvtColor(sourceMat, gray, cv.COLOR_RGBA2GRAY);
     gamma = gammaCorrect(cv, gray, 0.85);
-    enhanced = new cv.Mat();
-    cv.equalizeHist(gamma, enhanced);
+
+    // Replace global histogram equalization, which can over-darken eyelid
+    // shadows, with a dark-side adaptive pivot and sigmoid contrast curve.
+    const gammaIrisValues = collectCircularValues(gamma, localIrisCenter, localIrisRadius);
+    const tonePivot = clamp(
+      percentile(gammaIrisValues, PUPIL_TONE_PIVOT_PERCENTILE),
+      8,
+      110,
+    );
+    enhanced = pivotContrast(cv, gamma, tonePivot, PUPIL_TONE_SOFTNESS);
+
     blurred = new cv.Mat();
     cv.GaussianBlur(enhanced, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
 
@@ -532,19 +580,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
       -1,
     );
 
-    const irisValues = [];
-    const grayPixels = blurred.data;
-    const xStart = Math.max(0, Math.floor(localIrisCenter.x - localIrisRadius));
-    const xEnd = Math.min(blurred.cols - 1, Math.ceil(localIrisCenter.x + localIrisRadius));
-    const yStart = Math.max(0, Math.floor(localIrisCenter.y - localIrisRadius));
-    const yEnd = Math.min(blurred.rows - 1, Math.ceil(localIrisCenter.y + localIrisRadius));
-    for (let y = yStart; y <= yEnd; y += 1) {
-      for (let x = xStart; x <= xEnd; x += 1) {
-        if (Math.hypot(x - localIrisCenter.x, y - localIrisCenter.y) <= localIrisRadius) {
-          irisValues.push(grayPixels[y * blurred.cols + x]);
-        }
-      }
-    }
+    const irisValues = collectCircularValues(blurred, localIrisCenter, localIrisRadius);
     const darkThreshold = clamp(
       percentile(irisValues, PUPIL_THRESHOLD_PERCENTILE) + PUPIL_THRESHOLD_OFFSET,
       12,
@@ -688,6 +724,8 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
       });
       debug = {
         darkThreshold,
+        tonePivot,
+        toneSoftness: PUPIL_TONE_SOFTNESS,
         targetWidth,
         localIrisDiameter,
         contourCount: contours.size(),
@@ -713,8 +751,8 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
           },
           {
             key: 'equalized',
-            label: '4. 히스토그램 보정',
-            description: '눈 crop 전체의 명암 분포를 넓혀 대비를 강화',
+            label: '4. 피벗 대비 보정',
+            description: `홍채의 어두운 쪽 ${Math.round(PUPIL_TONE_PIVOT_PERCENTILE * 100)}백분위(${tonePivot})를 기준으로, 멀어질수록 검정·흰색에 가깝게 분리`,
             canvas: matToCanvas(cv, enhanced),
           },
           {
@@ -732,7 +770,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
           {
             key: 'threshold',
             label: '7. 어두운 영역 이진화',
-            description: `홍채 내부 ${Math.round(PUPIL_THRESHOLD_PERCENTILE * 100)}백분위 기반 임계값 ${darkThreshold}로 어두운 픽셀을 흰색 후보로 변환`,
+            description: `홍채 내부 ${Math.round(PUPIL_THRESHOLD_PERCENTILE * 100)}백분위 + ${PUPIL_THRESHOLD_OFFSET} 기준 임계값 ${darkThreshold}로 중간 정도의 어두운 픽셀까지 흰색 후보로 포함`,
             canvas: matToCanvas(cv, maskedBinary),
           },
           {
