@@ -1,4 +1,5 @@
 import { fillSmallBlackHoles4Connected } from './binary.js';
+import { chooseBestPupilFit, scorePupilFitMetrics } from './fitting.js';
 
 const EYE_DEFINITIONS = Object.freeze({
   right: Object.freeze({
@@ -40,6 +41,9 @@ const PUPIL_CLOSE_KERNEL_SIZE = 7;
 const PUPIL_HOLE_MAX_AREA_RATIO = 0.08;
 const PUPIL_HOLE_MAX_AREA_MIN = 12;
 const PUPIL_HOLE_MAX_AREA_MAX = 800;
+const PUPIL_FIT_MIN_CONFIDENCE = 0.38;
+const PUPIL_FIT_FULL_CONFIDENCE = 0.72;
+const PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO = 0.008;
 // Fill larger enclosed dark regions after closing. Border-connected black
 // pixels are still preserved as exterior background by the 4-neighbour
 // connected-component labelling step.
@@ -344,13 +348,19 @@ function meanEllipseAndRing(gray, width, height, ellipse, irisCenter, irisRadius
 }
 
 export function selectRefinedPupilCenter(mediaPipeCenter, detectedCenter, confidence) {
-  if (!detectedCenter || !Number.isFinite(confidence) || confidence < 0.5) {
+  if (!detectedCenter || !Number.isFinite(confidence) || confidence < PUPIL_FIT_MIN_CONFIDENCE) {
     return { center: { ...mediaPipeCenter }, source: 'mediapipe', detectedWeight: 0 };
   }
-  if (confidence >= 0.8) {
+  if (confidence >= PUPIL_FIT_FULL_CONFIDENCE) {
     return { center: { ...detectedCenter }, source: 'opencv', detectedWeight: 1 };
   }
-  const detectedWeight = 0.7;
+  const progress = clamp(
+    (confidence - PUPIL_FIT_MIN_CONFIDENCE)
+      / (PUPIL_FIT_FULL_CONFIDENCE - PUPIL_FIT_MIN_CONFIDENCE),
+    0,
+    1,
+  );
+  const detectedWeight = 0.62 + progress * 0.28;
   return {
     center: {
       x: detectedCenter.x * detectedWeight + mediaPipeCenter.x * (1 - detectedWeight),
@@ -487,6 +497,225 @@ function drawDebugOverlay(cropCanvas, {
   context.fillText(label, 12, 9);
   context.restore();
   return canvas;
+}
+
+
+function contourGeometry(cv, contour) {
+  const area = Math.max(0, cv.contourArea(contour, false));
+  const perimeter = Math.max(0, cv.arcLength(contour, true));
+  const moments = cv.moments(contour, false);
+  let center = null;
+  if (Math.abs(moments.m00) > 1e-6) {
+    center = {
+      x: moments.m10 / moments.m00,
+      y: moments.m01 / moments.m00,
+    };
+  } else {
+    const rect = cv.boundingRect(contour);
+    center = {
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+    };
+  }
+  return {
+    area,
+    perimeter,
+    center,
+    circularity: perimeter > 0
+      ? clamp(4 * Math.PI * area / (perimeter * perimeter), 0, 1)
+      : 0,
+  };
+}
+
+function selectPrimaryContour(cv, contours, localIrisCenter, irisArea, localIrisRadius) {
+  let best = null;
+  for (let index = 0; index < contours.size(); index += 1) {
+    const contour = contours.get(index);
+    try {
+      const geometry = contourGeometry(cv, contour);
+      const areaRatio = geometry.area / Math.max(1, irisArea);
+      if (areaRatio < PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO || areaRatio > 1.12) continue;
+      const centerDistanceRatio = Math.hypot(
+        geometry.center.x - localIrisCenter.x,
+        geometry.center.y - localIrisCenter.y,
+      ) / Math.max(1, localIrisRadius);
+      if (centerDistanceRatio > 1.05) continue;
+
+      // The component must be substantial and close to the MediaPipe iris
+      // center. This prevents eyelashes or isolated reflections from winning.
+      const proximity = clamp(1 - centerDistanceRatio / 1.05, 0, 1);
+      const componentScore = geometry.area * (0.30 + proximity * 0.70);
+      if (!best || componentScore > best.componentScore) {
+        best = {
+          index,
+          componentScore,
+          areaRatio,
+          centerDistanceRatio,
+          ...geometry,
+        };
+      }
+    } finally {
+      contour.delete();
+    }
+  }
+  return best;
+}
+
+function buildFitCandidates(cv, contour, geometry) {
+  const candidates = [];
+  const equivalentRadius = Math.sqrt(Math.max(1, geometry.area) / Math.PI);
+  candidates.push({
+    type: 'equivalent-circle',
+    x: geometry.center.x,
+    y: geometry.center.y,
+    width: equivalentRadius * 2,
+    height: equivalentRadius * 2,
+    angle: 0,
+  });
+
+  if (typeof cv.minEnclosingCircle === 'function') {
+    try {
+      const enclosing = cv.minEnclosingCircle(contour);
+      if (enclosing?.center && Number.isFinite(enclosing.radius) && enclosing.radius > 0) {
+        candidates.push({
+          type: 'enclosing-circle',
+          x: enclosing.center.x,
+          y: enclosing.center.y,
+          width: enclosing.radius * 2,
+          height: enclosing.radius * 2,
+          angle: 0,
+        });
+      }
+    } catch (error) {
+      console.debug('minEnclosingCircle unavailable for this contour.', error);
+    }
+  }
+
+  if (contour.rows >= 5) {
+    const hull = new cv.Mat();
+    try {
+      cv.convexHull(contour, hull, false, true);
+      if (hull.rows >= 5) {
+        const rotatedRect = cv.fitEllipse(hull);
+        candidates.push({
+          type: 'ellipse',
+          x: rotatedRect.center.x,
+          y: rotatedRect.center.y,
+          width: rotatedRect.size.width,
+          height: rotatedRect.size.height,
+          angle: rotatedRect.angle,
+        });
+      }
+    } finally {
+      hull.delete();
+    }
+  }
+
+  return candidates;
+}
+
+function drawCandidateMask(cv, rows, cols, candidate) {
+  const shapeMask = cv.Mat.zeros(rows, cols, cv.CV_8UC1);
+  const center = new cv.Point(Math.round(candidate.x), Math.round(candidate.y));
+  if (candidate.type.endsWith('circle')) {
+    cv.circle(
+      shapeMask,
+      center,
+      Math.max(1, Math.round(candidate.width / 2)),
+      new cv.Scalar(255),
+      -1,
+    );
+  } else {
+    cv.ellipse(
+      shapeMask,
+      center,
+      new cv.Size(
+        Math.max(1, Math.round(candidate.width / 2)),
+        Math.max(1, Math.round(candidate.height / 2)),
+      ),
+      candidate.angle || 0,
+      0,
+      360,
+      new cv.Scalar(255),
+      -1,
+    );
+  }
+  return shapeMask;
+}
+
+function evaluateFitCandidate(
+  cv,
+  candidate,
+  componentMask,
+  blurred,
+  localIrisCenter,
+  localIrisRadius,
+  localIrisDiameter,
+  contourGeometryResult,
+) {
+  const shapeMask = drawCandidateMask(cv, componentMask.rows, componentMask.cols, candidate);
+  const intersection = new cv.Mat();
+  const union = new cv.Mat();
+  try {
+    cv.bitwise_and(componentMask, shapeMask, intersection);
+    cv.bitwise_or(componentMask, shapeMask, union);
+    const intersectionArea = cv.countNonZero(intersection);
+    const unionArea = cv.countNonZero(union);
+    const componentArea = cv.countNonZero(componentMask);
+    const shapeArea = cv.countNonZero(shapeMask);
+    const iou = unionArea > 0 ? intersectionArea / unionArea : 0;
+    const coverage = componentArea > 0 ? intersectionArea / componentArea : 0;
+    const precision = shapeArea > 0 ? intersectionArea / shapeArea : 0;
+    const centerDistanceRatio = Math.hypot(
+      candidate.x - localIrisCenter.x,
+      candidate.y - localIrisCenter.y,
+    ) / Math.max(1, localIrisRadius);
+    const majorAxis = Math.max(candidate.width, candidate.height);
+    const minorAxis = Math.min(candidate.width, candidate.height);
+    const axisRatio = minorAxis / Math.max(1, majorAxis);
+    const diameterRatio = majorAxis / Math.max(1, localIrisDiameter);
+    const fitScore = scorePupilFitMetrics({
+      iou,
+      coverage,
+      precision,
+      centerDistanceRatio,
+      axisRatio,
+      diameterRatio,
+    });
+    const intensity = meanEllipseAndRing(
+      blurred.data,
+      blurred.cols,
+      blurred.rows,
+      candidate,
+      localIrisCenter,
+      localIrisRadius,
+    );
+    const contrast = clamp((intensity.ringMean - intensity.insideMean) / 70, 0, 1);
+    const confidence = clamp(
+      Math.max(fitScore, fitScore * 0.90 + contrast * 0.10),
+      0,
+      1,
+    );
+
+    return {
+      ...candidate,
+      score: fitScore,
+      confidence,
+      iou,
+      coverage,
+      precision,
+      centerDistanceRatio,
+      axisRatio,
+      diameterRatio,
+      contrast,
+      circularity: contourGeometryResult.circularity,
+      areaRatio: contourGeometryResult.areaRatio,
+    };
+  } finally {
+    shapeMask.delete();
+    intersection.delete();
+    union.delete();
+  }
 }
 
 function buildFallbackDebug(source, landmarks, side, width, height, reason) {
@@ -626,105 +855,117 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
 
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
-    cv.findContours(holeFilled, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    cv.findContours(holeFilled, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+
+    const primary = selectPrimaryContour(
+      cv,
+      contours,
+      localIrisCenter,
+      irisArea,
+      localIrisRadius,
+    );
+    let componentMask = null;
+    let selectedContour = null;
+    let fitSelection = { best: null, accepted: false, reason: 'no-component' };
+    let displayCandidate = null;
     let best = null;
 
-    for (let index = 0; index < contours.size(); index += 1) {
-      const contour = contours.get(index);
-      try {
-        if (contour.rows < 5) continue;
-        const area = cv.contourArea(contour, false);
-        const areaRatio = area / irisArea;
-        if (areaRatio < 0.018 || areaRatio > 0.60) continue;
-        const perimeter = cv.arcLength(contour, true);
-        if (!(perimeter > 0)) continue;
-        const rotatedRect = cv.fitEllipse(contour);
-        const ellipseWidth = Math.max(rotatedRect.size.width, rotatedRect.size.height);
-        const ellipseHeight = Math.min(rotatedRect.size.width, rotatedRect.size.height);
-        const axisRatio = ellipseHeight / Math.max(1, ellipseWidth);
-        const diameterRatio = ellipseWidth / Math.max(1, localIrisDiameter);
-        if (axisRatio < 0.50 || diameterRatio < 0.15 || diameterRatio > 0.80) continue;
+    if (primary) {
+      componentMask = cv.Mat.zeros(holeFilled.rows, holeFilled.cols, cv.CV_8UC1);
+      cv.drawContours(
+        componentMask,
+        contours,
+        primary.index,
+        new cv.Scalar(255),
+        -1,
+      );
+      selectedContour = contours.get(primary.index);
+      const candidates = buildFitCandidates(cv, selectedContour, primary);
+      const evaluatedCandidates = candidates.map((candidate) => evaluateFitCandidate(
+        cv,
+        candidate,
+        componentMask,
+        blurred,
+        localIrisCenter,
+        localIrisRadius,
+        localIrisDiameter,
+        primary,
+      ));
+      fitSelection = chooseBestPupilFit(evaluatedCandidates);
+      displayCandidate = fitSelection.best;
 
-        const centerDistanceRatio = Math.hypot(
-          rotatedRect.center.x - localIrisCenter.x,
-          rotatedRect.center.y - localIrisCenter.y,
-        ) / localIrisRadius;
-        if (centerDistanceRatio > 0.68) continue;
-
-        const circularity = clamp(4 * Math.PI * area / (perimeter * perimeter), 0, 1);
-        const ellipse = {
-          x: rotatedRect.center.x,
-          y: rotatedRect.center.y,
-          width: rotatedRect.size.width,
-          height: rotatedRect.size.height,
-          angle: rotatedRect.angle,
+      if (fitSelection.accepted && fitSelection.best) {
+        const fitted = fitSelection.best;
+        const detectedCenter = {
+          x: region.x + fitted.x / scaleX,
+          y: region.y + fitted.y / scaleY,
         };
-        const intensity = meanEllipseAndRing(
-          blurred.data,
-          blurred.cols,
-          blurred.rows,
-          ellipse,
-          localIrisCenter,
-          localIrisRadius,
-        );
-        const contrast = clamp((intensity.ringMean - intensity.insideMean) / 70, 0, 1);
-        const centerScore = clamp(1 - centerDistanceRatio / 0.68, 0, 1);
-        const diameterScore = clamp(1 - Math.abs(diameterRatio - 0.42) / 0.38, 0, 1);
-        const confidence = clamp(
-          circularity * 0.22
-          + axisRatio * 0.20
-          + contrast * 0.30
-          + centerScore * 0.18
-          + diameterScore * 0.10,
-          0,
-          1,
-        );
-
-        if (!best || confidence > best.confidence) {
-          best = {
-            confidence,
-            areaRatio,
-            axisRatio,
-            circularity,
-            contrast,
-            diameterRatio,
-            centerDistanceRatio,
-            localEllipse: ellipse,
-            detectedCenter: {
-              x: region.x + rotatedRect.center.x / scaleX,
-              y: region.y + rotatedRect.center.y / scaleY,
-            },
-            ellipseGlobal: {
-              x: region.x + rotatedRect.center.x / scaleX,
-              y: region.y + rotatedRect.center.y / scaleY,
-              width: rotatedRect.size.width / scaleX,
-              height: rotatedRect.size.height / scaleY,
-              angle: rotatedRect.angle,
-            },
-          };
-        }
-      } finally {
-        contour.delete();
+        best = {
+          ...fitted,
+          detectedCenter,
+          localEllipse: {
+            x: fitted.x,
+            y: fitted.y,
+            width: fitted.width,
+            height: fitted.height,
+            angle: fitted.angle || 0,
+          },
+          ellipseGlobal: {
+            x: detectedCenter.x,
+            y: detectedCenter.y,
+            width: fitted.width / scaleX,
+            height: fitted.height / scaleY,
+            angle: fitted.angle || 0,
+          },
+          fitType: fitted.type,
+          componentScore: primary.componentScore,
+          accepted: true,
+        };
       }
     }
+
+    try { selectedContour?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
+    selectedContour = null;
+    try { componentMask?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
+    componentMask = null;
 
     const selected = selectRefinedPupilCenter(mediaPipeCenter, best?.detectedCenter, best?.confidence ?? 0);
     let debug = null;
     if (includeDebug) {
+      const fitTypeLabels = {
+        'equivalent-circle': '중심·면적 원',
+        'enclosing-circle': '외접원',
+        ellipse: '타원',
+      };
+      const shownFit = best ?? displayCandidate;
+      const shownDetectedCenter = shownFit ? {
+        x: region.x + shownFit.x / scaleX,
+        y: region.y + shownFit.y / scaleY,
+      } : null;
+      const shownEllipse = shownFit ? {
+        x: shownFit.x,
+        y: shownFit.y,
+        width: shownFit.width,
+        height: shownFit.height,
+        angle: shownFit.angle || 0,
+      } : null;
+      const fitLabel = shownFit ? fitTypeLabels[shownFit.type] || shownFit.type : '후보 없음';
       const sourceLabel = selected.source === 'opencv'
-        ? 'OpenCV'
-        : selected.source === 'blended' ? 'OpenCV+MediaPipe 융합' : 'MediaPipe fallback';
+        ? `OpenCV ${fitLabel}`
+        : selected.source === 'blended'
+          ? `OpenCV ${fitLabel}+MediaPipe 융합`
+          : shownFit ? `${fitLabel} 후보 거절` : 'MediaPipe fallback';
       const finalOverlay = drawDebugOverlay(crop.canvas, {
         localIrisCenter,
         localIrisRadius,
         mediaPipeCenter,
-        detectedCenter: best?.detectedCenter ?? null,
+        detectedCenter: shownDetectedCenter,
         finalCenter: selected.center,
-        ellipse: best?.localEllipse ?? null,
+        ellipse: shownEllipse,
         scaleX,
         scaleY,
         region,
-        confidence: best?.confidence ?? 0,
+        confidence: best?.confidence ?? displayCandidate?.confidence ?? 0,
         source: sourceLabel,
       });
       debug = {
@@ -792,8 +1033,10 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
           },
           {
             key: 'result',
-            label: '10. 타원 fitting 결과',
-            description: '주황 원=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심',
+            label: '10. 원·타원 fitting 결과',
+            description: displayCandidate
+              ? `${displayCandidate.type} 선택 · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 적합도 ${(displayCandidate.score * 100).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
+              : '유효한 fitting 후보가 없어 MediaPipe 홍채 중심을 사용',
             canvas: finalOverlay,
           },
         ],

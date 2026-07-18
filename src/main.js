@@ -1014,6 +1014,8 @@ function renderEyeProcessing(container, metaElement, pupil) {
   metaElement.textContent = [
     `${pupil.source} · 신뢰도 ${(pupil.confidence * 100).toFixed(0)}%`,
     Number.isFinite(threshold) ? `임계값 ${threshold}` : null,
+    diagnostics?.fitType ? `fit ${diagnostics.fitType}` : null,
+    diagnostics && Number.isFinite(diagnostics.iou) ? `IoU ${(diagnostics.iou * 100).toFixed(0)}%` : null,
     diagnostics ? `대비 ${(diagnostics.contrast * 100).toFixed(0)}% · 원형도 ${(diagnostics.circularity * 100).toFixed(0)}%` : null,
   ].filter(Boolean).join(' · ');
 
