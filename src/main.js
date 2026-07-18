@@ -20,9 +20,12 @@ const LIVE_INTERVAL_MS = 170;
 const STABLE_FRAME_TARGET = 4;
 const MAX_PD_VARIATION_RATIO = 0.025;
 const AUTO_CAPTURE_DELAY_MS = 1000;
-const BURST_FRAME_COUNT = 3;
-const MIN_BURST_VALID_FRAMES = 2;
-const BURST_INTERVAL_MS = 100;
+const VIDEO_CAPTURE_DURATION_MS = 1000;
+const VIDEO_CAPTURE_TARGET_FPS = 30;
+const VIDEO_CAPTURE_MAX_FRAMES = 30;
+const VIDEO_ANALYSIS_FRAME_COUNT = 8;
+const MIN_VIDEO_VALID_FRAMES = 5;
+const VIDEO_FRAME_MAX_DIMENSION = 1920;
 const MAX_CAPTURE_DIMENSION = 4096;
 
 const elements = {
@@ -624,8 +627,8 @@ function toggleAutoCapture() {
   validHoldStartedAt = null;
 
   if (captureArmed) {
-    setMessage('휴대폰을 얼굴에서 약 30~40cm 떨어뜨린 뒤 자세와 눈 초점 조건을 유지하면 1초 후 3프레임을 자동 촬영합니다.', 'info');
-    elements.liveStatus.textContent = '30~40cm 거리에서 얼굴을 맞추세요 — 조건 충족 후 1초 자동촬영';
+    setMessage('휴대폰을 얼굴에서 약 30~40cm 떨어뜨리고 조건을 1초 유지하면, 이어서 1초간 영상 프레임을 수집합니다.', 'info');
+    elements.liveStatus.textContent = '30~40cm 거리에서 얼굴을 맞추세요 — 조건 충족 후 1초 영상수집';
   } else {
     setMessage('자동촬영을 취소했습니다.', 'info');
     elements.liveStatus.textContent = latestLiveState?.ready
@@ -672,11 +675,20 @@ async function captureWithImageCapture() {
 function captureVideoFrame() {
   const width = elements.cameraVideo.videoWidth;
   const height = elements.cameraVideo.videoHeight;
-  const canvas = createCanvas(width, height);
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  // CSS 미러링은 프리뷰에만 적용한다. 분석 이미지는 원본 좌표계로 유지한다.
-  context.drawImage(elements.cameraVideo, 0, 0, width, height);
-  return { canvas, method: 'video frame fallback' };
+
+  // CSS 미러링은 프리뷰에만 적용한다.
+  // 분석 이미지는 카메라 원본 좌표계를 유지한다.
+  const canvas = drawSourceToCanvas(
+    elements.cameraVideo,
+    width,
+    height,
+    VIDEO_FRAME_MAX_DIMENSION,
+  );
+
+  return {
+    canvas,
+    method: '1s video stream frame',
+  };
 }
 
 async function captureHighResolutionFrame() {
@@ -691,13 +703,305 @@ async function captureHighResolutionFrame() {
   return captureVideoFrame();
 }
 
+function waitForNextDecodedVideoFrame() {
+  const video = elements.cameraVideo;
+  const fallbackDelayMs =
+    1000 / VIDEO_CAPTURE_TARGET_FPS;
+
+  if (
+    typeof video.requestVideoFrameCallback
+    !== 'function'
+  ) {
+    return delay(fallbackDelayMs);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let callbackId = null;
+    let timeoutId = null;
+
+    const finish = (
+      timestamp,
+      cancelPendingCallback,
+    ) => {
+      if (settled) return;
+      settled = true;
+
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+
+      if (
+        cancelPendingCallback
+        && callbackId !== null
+        && typeof video.cancelVideoFrameCallback
+          === 'function'
+      ) {
+        video.cancelVideoFrameCallback(
+          callbackId,
+        );
+      }
+
+      resolve(timestamp);
+    };
+
+    callbackId =
+      video.requestVideoFrameCallback(
+        (timestamp) => {
+          finish(timestamp, false);
+        },
+      );
+
+    // 저프레임 카메라나 브라우저 오류 시 무한대기 방지
+    timeoutId = setTimeout(
+      () => {
+        finish(
+          performance.now(),
+          true,
+        );
+      },
+      120,
+    );
+  });
+}
+
+function scoreVideoCandidate(
+  canvas,
+  landmarks,
+) {
+  if (!landmarks) return 0;
+
+  try {
+    const eyeQuality =
+      measureEyeImageQuality(
+        canvas,
+        landmarks,
+        canvas.width,
+        canvas.height,
+      );
+
+    const exposurePenalty =
+      (
+        eyeQuality.maxUnderexposedRatio
+        + eyeQuality.maxOverexposedRatio
+      ) * 500;
+
+    return (
+      eyeQuality.minSharpness
+      - exposurePenalty
+    );
+  } catch {
+    return 0;
+  }
+}
+
+function releaseCaptureCanvas(capture) {
+  if (!capture?.canvas) return;
+
+  // 선택되지 않은 Canvas backing store를 즉시 축소한다.
+  capture.canvas.width = 1;
+  capture.canvas.height = 1;
+}
+
+async function captureOneSecondVideoWindow() {
+  const referenceLandmarks =
+    latestLiveState?.landmarks;
+
+  if (!referenceLandmarks) {
+    throw new Error(
+      '영상 수집 직전 얼굴 랜드마크가 없습니다.',
+    );
+  }
+
+  const selectedByBucket = new Map();
+
+  const bucketDurationMs =
+    VIDEO_CAPTURE_DURATION_MS
+    / VIDEO_ANALYSIS_FRAME_COUNT;
+
+  const startedAt = performance.now();
+  let sampledFrameCount = 0;
+
+  const addCurrentFrame = () => {
+    const elapsedMs = Math.max(
+      0,
+      Math.min(
+        VIDEO_CAPTURE_DURATION_MS - 0.001,
+        performance.now() - startedAt,
+      ),
+    );
+
+    const bucketIndex = Math.min(
+      VIDEO_ANALYSIS_FRAME_COUNT - 1,
+      Math.floor(
+        elapsedMs / bucketDurationMs,
+      ),
+    );
+
+    const capture =
+      captureVideoFrame();
+
+    capture.method =
+      '1s video stream frame '
+      + (sampledFrameCount + 1);
+
+    const score =
+      scoreVideoCandidate(
+        capture.canvas,
+        referenceLandmarks,
+      );
+
+    const existing =
+      selectedByBucket.get(
+        bucketIndex,
+      );
+
+    if (
+      !existing
+      || score > existing.score
+    ) {
+      if (existing) {
+        releaseCaptureCanvas(
+          existing.capture,
+        );
+      }
+
+      selectedByBucket.set(
+        bucketIndex,
+        {
+          bucketIndex,
+          score,
+          capture,
+        },
+      );
+    } else {
+      releaseCaptureCanvas(capture);
+    }
+
+    sampledFrameCount += 1;
+  };
+
+  // 시점 0의 프레임도 포함한다.
+  addCurrentFrame();
+
+  while (
+    sampledFrameCount
+      < VIDEO_CAPTURE_MAX_FRAMES
+    && performance.now() - startedAt
+      < VIDEO_CAPTURE_DURATION_MS
+  ) {
+    await waitForNextDecodedVideoFrame();
+
+    if (
+      performance.now() - startedAt
+      >= VIDEO_CAPTURE_DURATION_MS
+    ) {
+      break;
+    }
+
+    addCurrentFrame();
+  }
+
+  const captures =
+    [...selectedByBucket.values()]
+      .sort(
+        (a, b) =>
+          a.bucketIndex
+          - b.bucketIndex,
+      )
+      .map(
+        (entry) => entry.capture,
+      );
+
+  if (
+    captures.length
+    < MIN_VIDEO_VALID_FRAMES
+  ) {
+    throw new Error(
+      '1초 영상에서 분석 가능한 구간 프레임이 '
+      + captures.length
+      + '장뿐입니다. 최소 '
+      + MIN_VIDEO_VALID_FRAMES
+      + '장이 필요합니다.',
+    );
+  }
+
+  return {
+    captures,
+    sampledFrameCount,
+  };
+}
+
+function filterPdOutliers(analyses) {
+  if (
+    analyses.length
+    < MIN_VIDEO_VALID_FRAMES
+  ) {
+    return analyses;
+  }
+
+  const values = analyses.map(
+    (analysis) =>
+      analysis.measurement.pdMm,
+  );
+
+  const center = median(values);
+
+  const absoluteDeviations =
+    values.map(
+      (value) =>
+        Math.abs(value - center),
+    );
+
+  const mad =
+    median(absoluteDeviations);
+
+  /*
+   * MAD가 매우 작아도 최소 0.75mm 여유를 둔다.
+   * 2.5×MAD 밖의 큰 fitting 오류만 제거한다.
+   */
+  const limitMm = Math.max(
+    0.75,
+    2.5 * (
+      Number.isFinite(mad)
+        ? mad
+        : 0
+    ),
+  );
+
+  const filtered = analyses.filter(
+    (analysis) =>
+      Math.abs(
+        analysis.measurement.pdMm
+        - center,
+      ) <= limitMm,
+  );
+
+  /*
+   * 이상치 제거 후 5장 미만이면
+   * 지나치게 공격적인 제거로 보고 원본을 유지한다.
+   */
+  return filtered.length
+    >= MIN_VIDEO_VALID_FRAMES
+    ? filtered
+    : analyses;
+}
+
 async function captureCurrentFrame() {
-  if (!cameraStream || !latestLiveState?.ready) {
+  if (
+    !cameraStream
+    || !latestLiveState?.ready
+  ) {
     autoCaptureInProgress = false;
     captureArmed = true;
     validHoldStartedAt = null;
     syncCaptureButton();
-    setMessage('촬영 직전 자세가 흔들렸습니다. 자세를 다시 유지하세요.', 'warning');
+
+    setMessage(
+      '촬영 직전 자세가 흔들렸습니다. 자세를 다시 유지하세요.',
+      'warning',
+    );
+
     return;
   }
 
@@ -706,18 +1010,41 @@ async function captureCurrentFrame() {
   captureArmed = false;
   validHoldStartedAt = null;
   syncCaptureButton();
-  setMessage(`${BURST_FRAME_COUNT}프레임을 촬영하고 가장 안정적인 동공 중심을 계산하고 있습니다.`, 'info');
+
+  setMessage(
+    '1초간 영상 프레임을 수집하고 있습니다. 자세를 유지하세요.',
+    'info',
+  );
 
   try {
-    const captures = [];
-    for (let index = 0; index < BURST_FRAME_COUNT; index += 1) {
-      captures.push(await captureHighResolutionFrame());
-      if (index < BURST_FRAME_COUNT - 1) await delay(BURST_INTERVAL_MS);
-    }
-    await analyzeBurst(captures, { strictCapture: true });
+    const {
+      captures,
+      sampledFrameCount,
+    } =
+      await captureOneSecondVideoWindow();
+
+    setMessage(
+      sampledFrameCount
+      + '프레임을 수집했습니다. 선명한 '
+      + captures.length
+      + '프레임을 정밀 분석하고 있습니다.',
+      'info',
+    );
+
+    await analyzeBurst(
+      captures,
+      {
+        strictCapture: true,
+        sampledFrameCount,
+      },
+    );
   } finally {
     autoCaptureInProgress = false;
-    resetLiveGate('다음 측정은 촬영 준비 버튼을 누르세요');
+
+    resetLiveGate(
+      '다음 측정은 촬영 준비 버튼을 누르세요',
+    );
+
     livePaused = false;
   }
 }
@@ -905,7 +1232,7 @@ function aggregateBurst(analyses) {
   return { ...selected, measurement, quality };
 }
 
-async function analyzeBurst(captures, { strictCapture }) {
+async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null } = {}) {
   if (!faceLandmarker) return;
   const selectedSex = getSelectedSex();
   if (!selectedSex) {
@@ -913,7 +1240,7 @@ async function analyzeBurst(captures, { strictCapture }) {
     return;
   }
 
-  setStatus(elements.qualityBadge, '3프레임 분석 중', 'pending');
+  setStatus(elements.qualityBadge, captures.length + '프레임 정밀 분석 중', 'pending');
   try {
     await setModelMode('IMAGE');
     const cv = await getOpenCvOptional();
@@ -928,13 +1255,68 @@ async function analyzeBurst(captures, { strictCapture }) {
       }
     }
 
-    const usable = strictCapture ? analyses.filter((analysis) => analysis.quality.accepted) : analyses;
-    if (usable.length < MIN_BURST_VALID_FRAMES) {
-      const qualityReasons = analyses.flatMap((analysis) => analysis.quality.reasons);
-      throw new Error(qualityReasons[0] || failures[0] || `유효한 프레임이 ${usable.length}장뿐입니다. 최소 ${MIN_BURST_VALID_FRAMES}장이 필요합니다.`);
+    const qualityAccepted =
+      strictCapture
+        ? analyses.filter(
+          (analysis) =>
+            analysis.quality.accepted,
+        )
+        : analyses;
+
+    const requiredFrames =
+      strictCapture
+        ? MIN_VIDEO_VALID_FRAMES
+        : 1;
+
+    if (
+      qualityAccepted.length
+      < requiredFrames
+    ) {
+      const qualityReasons =
+        analyses.flatMap(
+          (analysis) =>
+            analysis.quality.reasons,
+        );
+
+      throw new Error(
+        qualityReasons[0]
+        || failures[0]
+        || (
+          '유효한 프레임이 '
+          + qualityAccepted.length
+          + '장뿐입니다. 최소 '
+          + requiredFrames
+          + '장이 필요합니다.'
+        ),
+      );
     }
 
-    const final = aggregateBurst(usable);
+    const usable =
+      strictCapture
+        ? filterPdOutliers(
+          qualityAccepted,
+        )
+        : qualityAccepted;
+
+    const final =
+      aggregateBurst(usable);
+
+    final.measurement.burst.sampledFrameCount =
+      Number.isFinite(
+        sampledFrameCount,
+      )
+        ? sampledFrameCount
+        : captures.length;
+
+    final.measurement.burst.analyzedFrameCount =
+      captures.length;
+
+    final.measurement.burst.qualityAcceptedFrameCount =
+      qualityAccepted.length;
+
+    final.measurement.burst.outlierRemovedCount =
+      qualityAccepted.length
+      - usable.length;
     const sexPrior = applySexPdPrior({
       rawPdMm: final.measurement.pdMm,
       sex: selectedSex,
@@ -954,9 +1336,29 @@ async function analyzeBurst(captures, { strictCapture }) {
     const fallbackText = final.measurement.pupilRefinement.fallbackCount
       ? ` · ${final.measurement.pupilRefinement.fallbackCount}개 눈 MediaPipe fallback`
       : ' · 양쪽 OpenCV 동공 보정';
+    const captureSummary =
+      Number.isFinite(
+        sampledFrameCount,
+      )
+        ? (
+          '1초 영상 '
+          + sampledFrameCount
+          + '프레임 수집 → '
+          + captures.length
+          + '프레임 선별 → '
+        )
+        : '';
+
     setMessage(
-      `${usable.length}프레임 중앙값을 사용했습니다${fallbackText}. ${priorSummary}`,
-      sexPrior.withinTypicalRange ? 'success' : 'warning',
+      captureSummary
+      + usable.length
+      + '프레임 중앙값을 사용했습니다'
+      + fallbackText
+      + '. '
+      + priorSummary,
+      sexPrior.withinTypicalRange
+        ? 'success'
+        : 'warning',
     );
   } catch (error) {
     console.error(error);
@@ -1211,9 +1613,32 @@ function updateMetrics(canvas, measurement, quality, sexPrior) {
   elements.eyeQualityValue.textContent = eyeQuality
     ? `초점 ${eyeQuality.left.sharpness.toFixed(0)} / ${eyeQuality.right.sharpness.toFixed(0)} · 밝기 ${eyeQuality.meanBrightness.toFixed(0)}`
     : '--';
-  elements.burstValue.textContent = measurement.burst
-    ? `${measurement.burst.frameCount}장 중앙값 · ${measurement.burst.values.map((value) => value.toFixed(1)).join(' / ')}mm · 범위 ${measurement.burst.spreadMm.toFixed(2)}mm`
-    : '단일 프레임';
+  const burstSamplePrefix =
+    measurement.burst?.sampledFrameCount
+      ? (
+        measurement.burst.sampledFrameCount
+        + '프레임 수집 → '
+      )
+      : '';
+
+  elements.burstValue.textContent =
+    measurement.burst
+      ? (
+        burstSamplePrefix
+        + measurement.burst.frameCount
+        + '장 중앙값 · '
+        + measurement.burst.values
+          .map(
+            (value) =>
+              value.toFixed(1),
+          )
+          .join(' / ')
+        + 'mm · 범위 '
+        + measurement.burst.spreadMm
+          .toFixed(2)
+        + 'mm'
+      )
+      : '단일 프레임';
   elements.captureMethodValue.textContent = measurement.captureMeta?.method || '--';
   const { yaw, pitch, roll } = measurement.pose;
   elements.poseValue.textContent = [yaw, pitch, roll].every(Number.isFinite)
