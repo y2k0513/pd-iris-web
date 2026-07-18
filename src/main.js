@@ -21,11 +21,10 @@ const STABLE_FRAME_TARGET = 4;
 const MAX_PD_VARIATION_RATIO = 0.025;
 const AUTO_CAPTURE_DELAY_MS = 1000;
 const VIDEO_CAPTURE_DURATION_MS = 1000;
-const VIDEO_CAPTURE_TARGET_FPS = 30;
-const VIDEO_CAPTURE_MAX_FRAMES = 30;
-const VIDEO_ANALYSIS_FRAME_COUNT = 8;
-const MIN_VIDEO_VALID_FRAMES = 5;
-const VIDEO_FRAME_MAX_DIMENSION = 1920;
+const VIDEO_CAPTURE_SAMPLE_COUNT = 10;
+const VIDEO_ANALYSIS_FRAME_COUNT = 6;
+const MIN_VIDEO_VALID_FRAMES = 4;
+const VIDEO_FRAME_MAX_DIMENSION = 1440;
 const MAX_CAPTURE_DIMENSION = 4096;
 
 const elements = {
@@ -703,68 +702,6 @@ async function captureHighResolutionFrame() {
   return captureVideoFrame();
 }
 
-function waitForNextDecodedVideoFrame() {
-  const video = elements.cameraVideo;
-  const fallbackDelayMs =
-    1000 / VIDEO_CAPTURE_TARGET_FPS;
-
-  if (
-    typeof video.requestVideoFrameCallback
-    !== 'function'
-  ) {
-    return delay(fallbackDelayMs);
-  }
-
-  return new Promise((resolve) => {
-    let settled = false;
-    let callbackId = null;
-    let timeoutId = null;
-
-    const finish = (
-      timestamp,
-      cancelPendingCallback,
-    ) => {
-      if (settled) return;
-      settled = true;
-
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-      }
-
-      if (
-        cancelPendingCallback
-        && callbackId !== null
-        && typeof video.cancelVideoFrameCallback
-          === 'function'
-      ) {
-        video.cancelVideoFrameCallback(
-          callbackId,
-        );
-      }
-
-      resolve(timestamp);
-    };
-
-    callbackId =
-      video.requestVideoFrameCallback(
-        (timestamp) => {
-          finish(timestamp, false);
-        },
-      );
-
-    // 저프레임 카메라나 브라우저 오류 시 무한대기 방지
-    timeoutId = setTimeout(
-      () => {
-        finish(
-          performance.now(),
-          true,
-        );
-      },
-      120,
-    );
-  });
-}
-
 function scoreVideoCandidate(
   canvas,
   landmarks,
@@ -798,7 +735,6 @@ function scoreVideoCandidate(
 function releaseCaptureCanvas(capture) {
   if (!capture?.canvas) return;
 
-  // 선택되지 않은 Canvas backing store를 즉시 축소한다.
   capture.canvas.width = 1;
   capture.canvas.height = 1;
 }
@@ -813,37 +749,47 @@ async function captureOneSecondVideoWindow() {
     );
   }
 
-  const selectedByBucket = new Map();
+  const candidates = [];
 
-  const bucketDurationMs =
+  const intervalMs =
     VIDEO_CAPTURE_DURATION_MS
-    / VIDEO_ANALYSIS_FRAME_COUNT;
-
-  const startedAt = performance.now();
-  let sampledFrameCount = 0;
-
-  const addCurrentFrame = () => {
-    const elapsedMs = Math.max(
-      0,
-      Math.min(
-        VIDEO_CAPTURE_DURATION_MS - 0.001,
-        performance.now() - startedAt,
-      ),
+    / Math.max(
+      1,
+      VIDEO_CAPTURE_SAMPLE_COUNT - 1,
     );
 
-    const bucketIndex = Math.min(
-      VIDEO_ANALYSIS_FRAME_COUNT - 1,
-      Math.floor(
-        elapsedMs / bucketDurationMs,
-      ),
-    );
+  const startedAt =
+    performance.now();
+
+  for (
+    let index = 0;
+    index < VIDEO_CAPTURE_SAMPLE_COUNT;
+    index += 1
+  ) {
+    const targetTime =
+      startedAt
+      + index * intervalMs;
+
+    const remainingMs =
+      targetTime - performance.now();
+
+    if (remainingMs > 0) {
+      await delay(remainingMs);
+    }
+
+    if (
+      elements.cameraVideo.readyState
+      < HTMLMediaElement.HAVE_CURRENT_DATA
+    ) {
+      continue;
+    }
 
     const capture =
       captureVideoFrame();
 
     capture.method =
-      '1s video stream frame '
-      + (sampledFrameCount + 1);
+      '1s video stream sample '
+      + (index + 1);
 
     const score =
       scoreVideoCandidate(
@@ -851,84 +797,79 @@ async function captureOneSecondVideoWindow() {
         referenceLandmarks,
       );
 
-    const existing =
-      selectedByBucket.get(
-        bucketIndex,
-      );
+    candidates.push({
+      index,
+      score,
+      capture,
+    });
 
-    if (
-      !existing
-      || score > existing.score
-    ) {
-      if (existing) {
-        releaseCaptureCanvas(
-          existing.capture,
-        );
-      }
+    setMessage(
+      '1초 영상 수집 중 '
+      + (index + 1)
+      + '/'
+      + VIDEO_CAPTURE_SAMPLE_COUNT,
+      'info',
+    );
 
-      selectedByBucket.set(
-        bucketIndex,
-        {
-          bucketIndex,
-          score,
-          capture,
-        },
-      );
-    } else {
-      releaseCaptureCanvas(capture);
-    }
-
-    sampledFrameCount += 1;
-  };
-
-  // 시점 0의 프레임도 포함한다.
-  addCurrentFrame();
-
-  while (
-    sampledFrameCount
-      < VIDEO_CAPTURE_MAX_FRAMES
-    && performance.now() - startedAt
-      < VIDEO_CAPTURE_DURATION_MS
-  ) {
-    await waitForNextDecodedVideoFrame();
-
-    if (
-      performance.now() - startedAt
-      >= VIDEO_CAPTURE_DURATION_MS
-    ) {
-      break;
-    }
-
-    addCurrentFrame();
+    // 상태 문구가 실제 화면에 그려질 시간을 준다.
+    await delay(0);
   }
 
-  const captures =
-    [...selectedByBucket.values()]
-      .sort(
-        (a, b) =>
-          a.bucketIndex
-          - b.bucketIndex,
-      )
-      .map(
-        (entry) => entry.capture,
-      );
-
   if (
-    captures.length
+    candidates.length
     < MIN_VIDEO_VALID_FRAMES
   ) {
+    for (const candidate of candidates) {
+      releaseCaptureCanvas(
+        candidate.capture,
+      );
+    }
+
     throw new Error(
-      '1초 영상에서 분석 가능한 구간 프레임이 '
-      + captures.length
-      + '장뿐입니다. 최소 '
+      '영상에서 '
+      + candidates.length
+      + '프레임만 수집됐습니다. 최소 '
       + MIN_VIDEO_VALID_FRAMES
-      + '장이 필요합니다.',
+      + '프레임이 필요합니다.',
     );
   }
 
+  const ranked =
+    [...candidates].sort(
+      (a, b) =>
+        b.score - a.score,
+    );
+
+  const selected =
+    ranked
+      .slice(
+        0,
+        VIDEO_ANALYSIS_FRAME_COUNT,
+      )
+      .sort(
+        (a, b) =>
+          a.index - b.index,
+      );
+
+  const selectedSet =
+    new Set(selected);
+
+  for (const candidate of candidates) {
+    if (!selectedSet.has(candidate)) {
+      releaseCaptureCanvas(
+        candidate.capture,
+      );
+    }
+  }
+
   return {
-    captures,
-    sampledFrameCount,
+    captures: selected.map(
+      (candidate) =>
+        candidate.capture,
+    ),
+
+    sampledFrameCount:
+      candidates.length,
   };
 }
 
@@ -1012,7 +953,7 @@ async function captureCurrentFrame() {
   syncCaptureButton();
 
   setMessage(
-    '1초간 영상 프레임을 수집하고 있습니다. 자세를 유지하세요.',
+    '1초간 영상 프레임을 수집합니다. 자세를 유지하세요.',
     'info',
   );
 
@@ -1025,9 +966,9 @@ async function captureCurrentFrame() {
 
     setMessage(
       sampledFrameCount
-      + '프레임을 수집했습니다. 선명한 '
+      + '프레임 수집 완료 · '
       + captures.length
-      + '프레임을 정밀 분석하고 있습니다.',
+      + '프레임 정밀 분석 시작',
       'info',
     );
 
@@ -1037,6 +978,25 @@ async function captureCurrentFrame() {
         strictCapture: true,
         sampledFrameCount,
       },
+    );
+  } catch (error) {
+    console.error(
+      'Video capture analysis failed.',
+      error,
+    );
+
+    resetMetrics();
+
+    setStatus(
+      elements.qualityBadge,
+      '촬영 무효',
+      'danger',
+    );
+
+    setMessage(
+      '영상 수집 또는 분석 실패: '
+      + error.message,
+      'danger',
     );
   } finally {
     autoCaptureInProgress = false;
@@ -1247,9 +1207,42 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
     const analyses = [];
     const failures = [];
 
-    for (const capture of captures) {
+    for (
+      let index = 0;
+      index < captures.length;
+      index += 1
+    ) {
+      const capture =
+        captures[index];
+
+      setStatus(
+        elements.qualityBadge,
+        (index + 1)
+        + '/'
+        + captures.length
+        + '프레임 분석 중',
+        'pending',
+      );
+
+      setMessage(
+        '보라색 원 정밀 분석 중 '
+        + (index + 1)
+        + '/'
+        + captures.length,
+        'info',
+      );
+
+      // OpenCV 작업 전에 화면 상태를 갱신한다.
+      await delay(0);
+
       try {
-        analyses.push(await analyzeFrame(capture.canvas, cv, capture.method));
+        analyses.push(
+          await analyzeFrame(
+            capture.canvas,
+            cv,
+            capture.method,
+          ),
+        );
       } catch (error) {
         failures.push(error.message);
       }
