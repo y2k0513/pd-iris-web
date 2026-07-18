@@ -8,6 +8,13 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+export function median(values) {
+  const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!finite.length) return Number.NaN;
+  const middle = Math.floor(finite.length / 2);
+  return finite.length % 2 ? finite[middle] : (finite[middle - 1] + finite[middle]) / 2;
+}
+
 // 성별 분포를 hard clipping이 아닌 soft prior로 사용한다.
 // priorLoss는 분포 중심에서 반폭(scaleMm)만큼 떨어지면 1이 되는 정규화 제곱손실이다.
 // 최종값은 측정값과 prior 중심의 정밀도 가중 평균이며, 촬영 품질이 낮을수록 prior 영향이 커진다.
@@ -240,7 +247,14 @@ function calculateEyeAndPerspectiveMetrics(landmarks, width, height, points) {
   };
 }
 
-export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 11.7 }) {
+export function measurePd({
+  landmarks,
+  matrix,
+  width,
+  height,
+  irisReferenceMm = 11.7,
+  centerOverrides = null,
+}) {
   if (!Array.isArray(landmarks) || landmarks.length < 478) {
     throw new Error('478개 얼굴 랜드마크를 찾지 못했습니다.');
   }
@@ -248,11 +262,24 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
     throw new Error('잘못된 이미지 크기 또는 홍채 기준값입니다.');
   }
 
-  const rightCenter = toPixel(landmarks[LANDMARKS.rightIrisCenter], width, height);
-  const leftCenter = toPixel(landmarks[LANDMARKS.leftIrisCenter], width, height);
+  const mediaPipeRightCenter = toPixel(landmarks[LANDMARKS.rightIrisCenter], width, height);
+  const mediaPipeLeftCenter = toPixel(landmarks[LANDMARKS.leftIrisCenter], width, height);
+  const rightCenter = centerOverrides?.right && Number.isFinite(centerOverrides.right.x) && Number.isFinite(centerOverrides.right.y)
+    ? { ...centerOverrides.right }
+    : mediaPipeRightCenter;
+  const leftCenter = centerOverrides?.left && Number.isFinite(centerOverrides.left.x) && Number.isFinite(centerOverrides.left.y)
+    ? { ...centerOverrides.left }
+    : mediaPipeLeftCenter;
   const rightBoundary = LANDMARKS.rightIrisBoundary.map((index) => toPixel(landmarks[index], width, height));
   const leftBoundary = LANDMARKS.leftIrisBoundary.map((index) => toPixel(landmarks[index], width, height));
-  const points = { leftCenter, rightCenter, leftBoundary, rightBoundary };
+  const points = {
+    leftCenter,
+    rightCenter,
+    leftBoundary,
+    rightBoundary,
+    mediaPipeLeftCenter,
+    mediaPipeRightCenter,
+  };
 
   const pdPx = distance(leftCenter, rightCenter);
   const rightIrisPx = maxPairwiseDistance(rightBoundary);
@@ -313,6 +340,7 @@ export function measurePd({ landmarks, matrix, width, height, irisReferenceMm = 
     framing: calculateFraming(landmarks),
     eyeAndPerspective: calculateEyeAndPerspectiveMetrics(landmarks, width, height, points),
     points,
+    centerSource: centerOverrides ? 'refined-pupil' : 'mediapipe-iris',
   };
 }
 
@@ -396,6 +424,44 @@ export function evaluateQuality(measurement, config) {
     if (eyeAndPerspective.irisDepthDifference > config.maxIrisDepthDifference) {
       warnings.push('좌우 눈의 상대 깊이 차이가 큽니다.');
       score -= 8;
+    }
+  }
+
+  if (measurement.eyeImageQuality) {
+    const eyeQuality = measurement.eyeImageQuality;
+    if (eyeQuality.minSharpness < config.minEyeSharpness) {
+      reasons.push(`눈 영역 초점이 흐림 (${eyeQuality.minSharpness.toFixed(0)})`);
+      score -= 18;
+    }
+    if (eyeQuality.minBrightness < config.minEyeBrightness) {
+      reasons.push(`눈 영역이 너무 어두움 (${eyeQuality.minBrightness.toFixed(0)})`);
+      score -= 15;
+    }
+    if (eyeQuality.maxBrightness > config.maxEyeBrightness) {
+      reasons.push(`눈 영역이 너무 밝음 (${eyeQuality.maxBrightness.toFixed(0)})`);
+      score -= 12;
+    }
+    if (eyeQuality.maxUnderexposedRatio > 0.30) {
+      warnings.push('눈 주변의 검게 뭉개진 픽셀이 많습니다.');
+      score -= 5;
+    }
+    if (eyeQuality.maxOverexposedRatio > 0.24) {
+      warnings.push('눈 주변의 과노출 픽셀이 많습니다.');
+      score -= 5;
+    }
+  }
+
+  if (measurement.pupilRefinement) {
+    const pupil = measurement.pupilRefinement;
+    if (!pupil.available) {
+      warnings.push('OpenCV 동공 보정을 사용할 수 없어 MediaPipe 홍채 중심을 사용했습니다.');
+      score -= 3;
+    } else if (pupil.fallbackCount > 0) {
+      warnings.push(`${pupil.fallbackCount}개 눈은 동공 검출 신뢰도가 낮아 MediaPipe 중심으로 대체했습니다.`);
+      score -= pupil.fallbackCount * 3;
+    } else if (pupil.minConfidence < config.minPupilConfidence) {
+      warnings.push(`동공 검출 신뢰도가 낮습니다 (${(pupil.minConfidence * 100).toFixed(0)}%).`);
+      score -= 4;
     }
   }
 

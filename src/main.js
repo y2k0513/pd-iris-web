@@ -1,13 +1,29 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import './style.css';
-import { applySexPdPrior, evaluateQuality, measurePd, SEX_PD_PRIORS } from './measurement.js';
+import {
+  applySexPdPrior,
+  evaluateQuality,
+  measurePd,
+  median,
+  SEX_PD_PRIORS,
+} from './measurement.js';
+import {
+  ensureOpenCvReady,
+  measureEyeImageQuality,
+  refinePupilCenters,
+} from './pupil.js';
 
 const OFFICIAL_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
+const OFFICIAL_OPENCV_URL = 'https://docs.opencv.org/4.x/opencv.js';
 const LIVE_INTERVAL_MS = 170;
 const STABLE_FRAME_TARGET = 4;
 const MAX_PD_VARIATION_RATIO = 0.025;
 const AUTO_CAPTURE_DELAY_MS = 1000;
+const BURST_FRAME_COUNT = 3;
+const MIN_BURST_VALID_FRAMES = 2;
+const BURST_INTERVAL_MS = 100;
+const MAX_CAPTURE_DIMENSION = 4096;
 
 const elements = {
   mediaStage: document.querySelector('#mediaStage'),
@@ -20,6 +36,7 @@ const elements = {
   liveStatus: document.querySelector('#liveStatus'),
   resultPlaceholder: document.querySelector('#resultPlaceholder'),
   modelStatus: document.querySelector('#modelStatus'),
+  opencvStatus: document.querySelector('#opencvStatus'),
   cameraMeta: document.querySelector('#cameraMeta'),
   qualityBadge: document.querySelector('#qualityBadge'),
   startCameraButton: document.querySelector('#startCameraButton'),
@@ -31,6 +48,7 @@ const elements = {
   poseCheck: document.querySelector('#poseCheck'),
   perspectiveCheck: document.querySelector('#perspectiveCheck'),
   gazeCheck: document.querySelector('#gazeCheck'),
+  eyeQualityCheck: document.querySelector('#eyeQualityCheck'),
   stabilityCheck: document.querySelector('#stabilityCheck'),
   pdValue: document.querySelector('#pdValue'),
   rawPdValue: document.querySelector('#rawPdValue'),
@@ -40,6 +58,10 @@ const elements = {
   pdPxValue: document.querySelector('#pdPxValue'),
   irisPxValue: document.querySelector('#irisPxValue'),
   irisDiffValue: document.querySelector('#irisDiffValue'),
+  pupilValue: document.querySelector('#pupilValue'),
+  eyeQualityValue: document.querySelector('#eyeQualityValue'),
+  burstValue: document.querySelector('#burstValue'),
+  captureMethodValue: document.querySelector('#captureMethodValue'),
   poseValue: document.querySelector('#poseValue'),
   perspectiveValue: document.querySelector('#perspectiveValue'),
   depthEstimateValue: document.querySelector('#depthEstimateValue'),
@@ -53,11 +75,16 @@ const elements = {
   maxYawInput: document.querySelector('#maxYawInput'),
   maxPitchInput: document.querySelector('#maxPitchInput'),
   maxRollInput: document.querySelector('#maxRollInput'),
+  minIrisPixelsInput: document.querySelector('#minIrisPixelsInput'),
+  minEyeSharpnessInput: document.querySelector('#minEyeSharpnessInput'),
+  minEyeBrightnessInput: document.querySelector('#minEyeBrightnessInput'),
+  maxEyeBrightnessInput: document.querySelector('#maxEyeBrightnessInput'),
 };
 
 let faceLandmarker = null;
 let activeMode = 'VIDEO';
 let cameraStream = null;
+let imageCapture = null;
 let animationFrameId = null;
 let liveBusy = false;
 let livePaused = false;
@@ -70,8 +97,16 @@ let lastAnalysisSource = null;
 let captureArmed = false;
 let validHoldStartedAt = null;
 let autoCaptureInProgress = false;
+let openCvInstance = null;
+let openCvLoadError = null;
+let openCvPromise = null;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function setStatus(element, text, kind) {
+  if (!element) return;
   element.textContent = text;
   element.className = `status-pill ${kind}`;
 }
@@ -101,6 +136,35 @@ async function setModelMode(mode) {
   if (!faceLandmarker || activeMode === mode) return;
   await faceLandmarker.setOptions({ runningMode: mode });
   activeMode = mode;
+}
+
+async function initializeOpenCv() {
+  setStatus(elements.opencvStatus, '동공 보정 준비 중', 'pending');
+  openCvPromise = ensureOpenCvReady([
+    assetUrl('opencv/opencv.js'),
+    OFFICIAL_OPENCV_URL,
+  ]);
+  try {
+    openCvInstance = await openCvPromise;
+    setStatus(elements.opencvStatus, 'OpenCV 동공 보정 준비됨', 'success');
+    return openCvInstance;
+  } catch (error) {
+    openCvLoadError = error;
+    console.warn('OpenCV unavailable; MediaPipe fallback will be used.', error);
+    setStatus(elements.opencvStatus, 'OpenCV 미사용 · fallback', 'danger');
+    return null;
+  }
+}
+
+async function getOpenCvOptional() {
+  if (openCvInstance?.Mat) return openCvInstance;
+  if (openCvLoadError) return null;
+  if (!openCvPromise) void initializeOpenCv();
+  try {
+    return await openCvPromise;
+  } catch {
+    return null;
+  }
 }
 
 async function initializeModel() {
@@ -148,7 +212,7 @@ function getConfig() {
     maxRoll: Number(elements.maxRollInput.value) || 5,
     requirePose: true,
     maxIrisDifferenceRatio: 0.10,
-    minIrisPixels: 14,
+    minIrisPixels: Number(elements.minIrisPixelsInput.value) || 20,
     minFaceHeightRatio: 0.40,
     maxFaceHeightRatio: 0.72,
     maxFaceCenterOffsetX: 0.10,
@@ -160,6 +224,10 @@ function getConfig() {
     maxIrisDepthDifference: 0.025,
     max2D3DDisagreementRatio: 0.10,
     warn2D3DDisagreementRatio: 0.06,
+    minEyeSharpness: Number(elements.minEyeSharpnessInput.value) || 35,
+    minEyeBrightness: Number(elements.minEyeBrightnessInput.value) || 35,
+    maxEyeBrightness: Number(elements.maxEyeBrightnessInput.value) || 225,
+    minPupilConfidence: 0.50,
   };
 }
 
@@ -203,6 +271,22 @@ async function requestHighResolutionCamera() {
   }
 }
 
+async function maximizeCameraTrack(track) {
+  if (!track?.getCapabilities || !track?.applyConstraints) return;
+  try {
+    const capabilities = track.getCapabilities();
+    const width = Math.min(capabilities.width?.max || 3840, 4096);
+    const height = Math.min(capabilities.height?.max || 2160, 3072);
+    await track.applyConstraints({
+      width: { ideal: width },
+      height: { ideal: height },
+      frameRate: { ideal: Math.min(capabilities.frameRate?.max || 30, 30) },
+    });
+  } catch (error) {
+    console.warn('Maximum camera constraint could not be applied.', error);
+  }
+}
+
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     setMessage('이 브라우저는 웹 카메라 촬영을 지원하지 않습니다.', 'danger');
@@ -223,6 +307,8 @@ async function startCamera() {
 
   try {
     cameraStream = await requestHighResolutionCamera();
+    const track = cameraStream.getVideoTracks()[0];
+    await maximizeCameraTrack(track);
     elements.cameraVideo.srcObject = cameraStream;
     await elements.cameraVideo.play();
     await new Promise((resolve) => {
@@ -230,14 +316,21 @@ async function startCamera() {
       else elements.cameraVideo.addEventListener('loadedmetadata', resolve, { once: true });
     });
 
-    const track = cameraStream.getVideoTracks()[0];
     const settings = track.getSettings();
     const width = settings.width || elements.cameraVideo.videoWidth;
     const height = settings.height || elements.cameraVideo.videoHeight;
     const fps = settings.frameRate ? ` · ${Math.round(settings.frameRate)}fps` : '';
+    imageCapture = null;
+    if ('ImageCapture' in window) {
+      try {
+        imageCapture = new ImageCapture(track);
+      } catch (error) {
+        console.warn('ImageCapture initialization failed.', error);
+      }
+    }
 
     elements.mediaStage.style.aspectRatio = `${elements.cameraVideo.videoWidth} / ${elements.cameraVideo.videoHeight}`;
-    elements.cameraMeta.textContent = `${width}×${height}${fps}`;
+    elements.cameraMeta.textContent = `${width}×${height}${fps}${imageCapture ? ' · 고해상도 사진 지원' : ' · 비디오 프레임 캡처'}`;
     elements.emptyState.hidden = true;
     elements.cameraVideo.hidden = false;
     elements.liveOverlay.hidden = false;
@@ -260,6 +353,7 @@ async function startCamera() {
 function stopCamera() {
   autoCaptureInProgress = false;
   livePaused = false;
+  imageCapture = null;
   if (animationFrameId) cancelAnimationFrame(animationFrameId);
   animationFrameId = null;
   cameraStream?.getTracks().forEach((track) => track.stop());
@@ -325,6 +419,18 @@ function processLiveResult(result, timestamp = performance.now()) {
     height: elements.cameraVideo.videoHeight,
     irisReferenceMm: config.irisReferenceMm,
   });
+
+  try {
+    measurement.eyeImageQuality = measureEyeImageQuality(
+      elements.cameraVideo,
+      landmarks,
+      elements.cameraVideo.videoWidth,
+      elements.cameraVideo.videoHeight,
+    );
+  } catch (error) {
+    console.warn('Live eye quality measurement failed.', error);
+  }
+
   const quality = evaluateQuality(measurement, config);
 
   if (quality.accepted) {
@@ -355,11 +461,11 @@ function processLiveResult(result, timestamp = performance.now()) {
     };
 
     let remainingMs = null;
-    if (captureArmed) {
+    if (captureArmed && ready) {
       if (validHoldStartedAt === null) validHoldStartedAt = timestamp;
       remainingMs = Math.max(0, AUTO_CAPTURE_DELAY_MS - (timestamp - validHoldStartedAt));
 
-      if (remainingMs <= 0 && ready && !autoCaptureInProgress) {
+      if (remainingMs <= 0 && !autoCaptureInProgress) {
         autoCaptureInProgress = true;
         captureArmed = false;
         syncCaptureButton();
@@ -383,7 +489,7 @@ function processLiveResult(result, timestamp = performance.now()) {
 
 function updateLiveIndicators(measurement, quality, ready, variation, remainingMs) {
   const config = getConfig();
-  const { pose, eyeAndPerspective } = measurement;
+  const { pose, eyeAndPerspective, eyeImageQuality } = measurement;
   const poseOk = [pose.yaw, pose.pitch, pose.roll].every(Number.isFinite)
     && Math.abs(pose.yaw) <= config.maxYaw
     && Math.abs(pose.pitch) <= config.maxPitch
@@ -392,6 +498,10 @@ function updateLiveIndicators(measurement, quality, ready, variation, remainingM
     && measurement.irisDifferenceRatio <= config.maxIrisDifferenceRatio
     && measurement.depthAware.disagreementRatio <= config.max2D3DDisagreementRatio;
   const gazeOk = eyeAndPerspective.gazeOffset <= config.maxGazeOffset;
+  const eyeQualityOk = Boolean(eyeImageQuality)
+    && eyeImageQuality.minSharpness >= config.minEyeSharpness
+    && eyeImageQuality.minBrightness >= config.minEyeBrightness
+    && eyeImageQuality.maxBrightness <= config.maxEyeBrightness;
 
   setCheck(elements.poseCheck, poseOk, `자세 ${pose.yaw.toFixed(1)}/${pose.pitch.toFixed(1)}/${pose.roll.toFixed(1)}°`);
   setCheck(
@@ -400,6 +510,13 @@ function updateLiveIndicators(measurement, quality, ready, variation, remainingM
     `원근 ${(eyeAndPerspective.perspectiveAsymmetryRatio * 100).toFixed(1)}% · 3D검증 ${(measurement.depthAware.disagreementRatio * 100).toFixed(1)}%`,
   );
   setCheck(elements.gazeCheck, gazeOk, `시선 ${(eyeAndPerspective.gazeOffset * 100).toFixed(0)}%`);
+  setCheck(
+    elements.eyeQualityCheck,
+    eyeQualityOk,
+    eyeImageQuality
+      ? `눈 초점 ${eyeImageQuality.minSharpness.toFixed(0)} · 밝기 ${eyeImageQuality.meanBrightness.toFixed(0)}`
+      : '눈 품질 --',
+  );
   setCheck(
     elements.stabilityCheck,
     ready,
@@ -418,11 +535,9 @@ function updateLiveIndicators(measurement, quality, ready, variation, remainingM
   }
 
   if (captureArmed) {
-    if (remainingMs !== null) {
-      elements.liveGuide.className = ready
-        ? 'face-guide live-guide ready'
-        : 'face-guide live-guide checking';
-      elements.liveStatus.textContent = `자세 유지 — ${(remainingMs / 1000).toFixed(1)}초 후 자동촬영`;
+    if (ready && remainingMs !== null) {
+      elements.liveGuide.className = 'face-guide live-guide ready';
+      elements.liveStatus.textContent = `자세 유지 — ${(remainingMs / 1000).toFixed(1)}초 후 3장 자동촬영`;
     } else {
       elements.liveGuide.className = 'face-guide live-guide checking';
       elements.liveStatus.textContent = '움직이지 말고 자세를 유지하세요';
@@ -449,7 +564,7 @@ function syncCaptureButton() {
   elements.captureButton.classList.toggle('armed', captureArmed);
 
   if (autoCaptureInProgress) {
-    elements.captureButton.textContent = '촬영 및 분석 중';
+    elements.captureButton.textContent = '3장 촬영 및 분석 중';
   } else if (captureArmed) {
     elements.captureButton.textContent = '자동촬영 취소';
   } else {
@@ -472,6 +587,7 @@ function resetLiveGate(message, { preserveArm = false } = {}) {
     [elements.poseCheck, '자세 --'],
     [elements.perspectiveCheck, '원근 --'],
     [elements.gazeCheck, '시선 --'],
+    [elements.eyeQualityCheck, '눈 품질 --'],
     [elements.stabilityCheck, '안정성 --'],
   ]) {
     element.textContent = label;
@@ -494,7 +610,7 @@ function toggleAutoCapture() {
   validHoldStartedAt = null;
 
   if (captureArmed) {
-    setMessage('자세 조건을 맞춘 채 유지하면 1초 뒤 자동으로 촬영합니다.', 'info');
+    setMessage('자세와 눈 초점 조건을 맞춘 채 유지하면 1초 뒤 3프레임을 자동 촬영합니다.', 'info');
     elements.liveStatus.textContent = '얼굴을 맞추세요 — 조건 충족 후 1초 자동촬영';
   } else {
     setMessage('자동촬영을 취소했습니다.', 'info');
@@ -504,6 +620,61 @@ function toggleAutoCapture() {
   }
 
   syncCaptureButton();
+}
+
+function createCanvas(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+function drawSourceToCanvas(source, sourceWidth, sourceHeight, maxDimension = MAX_CAPTURE_DIMENSION) {
+  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(source, 0, 0, width, height);
+  return canvas;
+}
+
+async function captureWithImageCapture() {
+  if (!imageCapture?.takePhoto) return null;
+  const blob = await imageCapture.takePhoto();
+  const bitmap = await decodeImageFile(blob);
+  try {
+    const width = bitmap.width || bitmap.naturalWidth;
+    const height = bitmap.height || bitmap.naturalHeight;
+    return {
+      canvas: drawSourceToCanvas(bitmap, width, height),
+      method: 'ImageCapture.takePhoto',
+    };
+  } finally {
+    if (typeof bitmap.close === 'function') bitmap.close();
+  }
+}
+
+function captureVideoFrame() {
+  const width = elements.cameraVideo.videoWidth;
+  const height = elements.cameraVideo.videoHeight;
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  // CSS 미러링은 프리뷰에만 적용한다. 분석 이미지는 원본 좌표계로 유지한다.
+  context.drawImage(elements.cameraVideo, 0, 0, width, height);
+  return { canvas, method: 'video frame fallback' };
+}
+
+async function captureHighResolutionFrame() {
+  if (imageCapture) {
+    try {
+      return await captureWithImageCapture();
+    } catch (error) {
+      console.warn('takePhoto failed; using video frame.', error);
+      imageCapture = null;
+    }
+  }
+  return captureVideoFrame();
 }
 
 async function captureCurrentFrame() {
@@ -521,22 +692,15 @@ async function captureCurrentFrame() {
   captureArmed = false;
   validHoldStartedAt = null;
   syncCaptureButton();
+  setMessage(`${BURST_FRAME_COUNT}프레임을 촬영하고 가장 안정적인 동공 중심을 계산하고 있습니다.`, 'info');
 
   try {
-    const width = elements.cameraVideo.videoWidth;
-    const height = elements.cameraVideo.videoHeight;
-    const canvas = elements.captureCanvas;
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    context.save();
-    context.translate(width, 0);
-    context.scale(-1, 1);
-    context.drawImage(elements.cameraVideo, 0, 0, width, height);
-    context.restore();
-
-    elements.cameraMeta.textContent = `촬영 · ${width}×${height}`;
-    await analyzeCanvas(canvas, { strictCapture: true });
+    const captures = [];
+    for (let index = 0; index < BURST_FRAME_COUNT; index += 1) {
+      captures.push(await captureHighResolutionFrame());
+      if (index < BURST_FRAME_COUNT - 1) await delay(BURST_INTERVAL_MS);
+    }
+    await analyzeBurst(captures, { strictCapture: true });
   } finally {
     autoCaptureInProgress = false;
     resetLiveGate('다음 측정은 촬영 준비 버튼을 누르세요');
@@ -576,17 +740,9 @@ async function loadFile(file) {
     source = await decodeImageFile(file);
     const sourceWidth = source.width || source.naturalWidth;
     const sourceHeight = source.height || source.naturalHeight;
-    const maxDimension = 4096;
-    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
-    const width = Math.round(sourceWidth * scale);
-    const height = Math.round(sourceHeight * scale);
-    const canvas = elements.captureCanvas;
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    context.drawImage(source, 0, 0, width, height);
-    elements.cameraMeta.textContent = `사진 테스트 · ${width}×${height}`;
-    await analyzeCanvas(canvas, { strictCapture: false });
+    const canvas = drawSourceToCanvas(source, sourceWidth, sourceHeight);
+    elements.cameraMeta.textContent = `사진 테스트 · ${canvas.width}×${canvas.height}`;
+    await analyzeCanvas(canvas, { strictCapture: false, captureMethod: 'gallery image' });
   } catch (error) {
     console.error(error);
     setMessage(`사진을 열지 못했습니다: ${error.message}`, 'danger');
@@ -596,7 +752,153 @@ async function loadFile(file) {
   }
 }
 
-async function analyzeCanvas(canvas, { strictCapture }) {
+async function analyzeFrame(canvas, cv, captureMethod = 'unknown') {
+  const result = faceLandmarker.detect(canvas);
+  if (result.faceLandmarks.length !== 1) {
+    throw new Error(result.faceLandmarks.length === 0 ? '얼굴을 찾지 못했습니다.' : '한 명의 얼굴만 촬영해야 합니다.');
+  }
+
+  const landmarks = result.faceLandmarks[0];
+  const matrix = result.facialTransformationMatrixes?.[0];
+  const config = getConfig();
+  const eyeImageQuality = measureEyeImageQuality(canvas, landmarks, canvas.width, canvas.height);
+  const pupilRefinement = refinePupilCenters({
+    source: canvas,
+    landmarks,
+    width: canvas.width,
+    height: canvas.height,
+    cv,
+  });
+  const measurement = measurePd({
+    landmarks,
+    matrix,
+    width: canvas.width,
+    height: canvas.height,
+    irisReferenceMm: config.irisReferenceMm,
+    centerOverrides: {
+      right: pupilRefinement.right.finalCenter,
+      left: pupilRefinement.left.finalCenter,
+    },
+  });
+  measurement.eyeImageQuality = eyeImageQuality;
+  measurement.pupilRefinement = pupilRefinement;
+  measurement.captureMeta = { method: captureMethod };
+  const quality = evaluateQuality(measurement, config);
+  return { canvas, landmarks, measurement, quality };
+}
+
+function aggregateBurst(analyses) {
+  const values = analyses.map((analysis) => analysis.measurement.pdMm);
+  const medianPdMm = median(values);
+  const selected = [...analyses].sort((a, b) => {
+    const aDistance = Math.abs(a.measurement.pdMm - medianPdMm);
+    const bDistance = Math.abs(b.measurement.pdMm - medianPdMm);
+    if (aDistance !== bDistance) return aDistance - bDistance;
+    const aSharpness = a.measurement.eyeImageQuality?.minSharpness || 0;
+    const bSharpness = b.measurement.eyeImageQuality?.minSharpness || 0;
+    return bSharpness - aSharpness;
+  })[0];
+
+  const singleFramePdMm = selected.measurement.pdMm;
+  const meanQualityScore = Math.round(
+    analyses.reduce((sum, analysis) => sum + analysis.quality.score, 0) / analyses.length,
+  );
+  const pd3D = selected.measurement.pdMm3D;
+  const estimateMean = (medianPdMm + pd3D) / 2;
+  const measurement = {
+    ...selected.measurement,
+    pdMm: medianPdMm,
+    pdMm2D: medianPdMm,
+    pdPx: medianPdMm / selected.measurement.mmPerPixel,
+    depthAware: {
+      ...selected.measurement.depthAware,
+      disagreementRatio: Math.abs(pd3D - medianPdMm) / estimateMean,
+    },
+    burst: {
+      frameCount: analyses.length,
+      values,
+      medianPdMm,
+      singleFramePdMm,
+      spreadMm: Math.max(...values) - Math.min(...values),
+    },
+  };
+  const quality = {
+    ...selected.quality,
+    score: meanQualityScore,
+  };
+  return { ...selected, measurement, quality };
+}
+
+async function analyzeBurst(captures, { strictCapture }) {
+  if (!faceLandmarker) return;
+  const selectedSex = getSelectedSex();
+  if (!selectedSex) {
+    setMessage('분석 전에 성별을 선택하세요.', 'danger');
+    return;
+  }
+
+  setStatus(elements.qualityBadge, '3프레임 분석 중', 'pending');
+  try {
+    await setModelMode('IMAGE');
+    const cv = await getOpenCvOptional();
+    const analyses = [];
+    const failures = [];
+
+    for (const capture of captures) {
+      try {
+        analyses.push(await analyzeFrame(capture.canvas, cv, capture.method));
+      } catch (error) {
+        failures.push(error.message);
+      }
+    }
+
+    const usable = strictCapture ? analyses.filter((analysis) => analysis.quality.accepted) : analyses;
+    if (usable.length < MIN_BURST_VALID_FRAMES) {
+      const qualityReasons = analyses.flatMap((analysis) => analysis.quality.reasons);
+      throw new Error(qualityReasons[0] || failures[0] || `유효한 프레임이 ${usable.length}장뿐입니다. 최소 ${MIN_BURST_VALID_FRAMES}장이 필요합니다.`);
+    }
+
+    const final = aggregateBurst(usable);
+    const sexPrior = applySexPdPrior({
+      rawPdMm: final.measurement.pdMm,
+      sex: selectedSex,
+      qualityScore: final.quality.score,
+      strength: getConfig().priorStrength,
+    });
+
+    copyCanvas(final.canvas, elements.captureCanvas);
+    lastAnalysisSource = elements.captureCanvas;
+    renderResult(final.canvas, final.landmarks, final.measurement, final.quality);
+    updateMetrics(final.canvas, final.measurement, final.quality, sexPrior);
+    setStatus(elements.qualityBadge, '측정 가능', 'success');
+    const priorSummary = sexPrior.withinTypicalRange
+      ? `${sexPrior.label} 분포 안 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`
+      : `${sexPrior.label} 기준 ${sexPrior.minMm}–${sexPrior.maxMm}mm 밖 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`;
+    const fallbackText = final.measurement.pupilRefinement.fallbackCount
+      ? ` · ${final.measurement.pupilRefinement.fallbackCount}개 눈 MediaPipe fallback`
+      : ' · 양쪽 OpenCV 동공 보정';
+    setMessage(
+      `${usable.length}프레임 중앙값을 사용했습니다${fallbackText}. ${priorSummary}`,
+      sexPrior.withinTypicalRange ? 'success' : 'warning',
+    );
+  } catch (error) {
+    console.error(error);
+    resetMetrics();
+    setStatus(elements.qualityBadge, '촬영 무효', 'danger');
+    setMessage(error.message, 'danger');
+  } finally {
+    await setModelMode('VIDEO');
+  }
+}
+
+function copyCanvas(source, target) {
+  if (source === target) return;
+  target.width = source.width;
+  target.height = source.height;
+  target.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0);
+}
+
+async function analyzeCanvas(canvas, { strictCapture, captureMethod = 'single image' }) {
   if (!faceLandmarker) return;
   const selectedSex = getSelectedSex();
   if (!selectedSex) {
@@ -606,25 +908,14 @@ async function analyzeCanvas(canvas, { strictCapture }) {
   const wasLivePaused = livePaused;
   livePaused = true;
   setStatus(elements.qualityBadge, '분석 중', 'pending');
-  setMessage('고해상도 프레임을 다시 분석하고 있습니다.', 'info');
+  setMessage('눈 crop에서 동공 중심과 초점 품질을 분석하고 있습니다.', 'info');
 
   try {
     await setModelMode('IMAGE');
-    const result = faceLandmarker.detect(canvas);
-    if (result.faceLandmarks.length !== 1) {
-      throw new Error(result.faceLandmarks.length === 0 ? '얼굴을 찾지 못했습니다.' : '한 명의 얼굴만 촬영해야 합니다.');
-    }
-
-    const landmarks = result.faceLandmarks[0];
-    const measurement = measurePd({
-      landmarks,
-      matrix: result.facialTransformationMatrixes?.[0],
-      width: canvas.width,
-      height: canvas.height,
-      irisReferenceMm: getConfig().irisReferenceMm,
-    });
+    const cv = await getOpenCvOptional();
+    const analysis = await analyzeFrame(canvas, cv, captureMethod);
+    const { measurement, quality, landmarks } = analysis;
     const config = getConfig();
-    const quality = evaluateQuality(measurement, config);
     const sexPrior = applySexPdPrior({
       rawPdMm: measurement.pdMm,
       sex: selectedSex,
@@ -635,11 +926,12 @@ async function analyzeCanvas(canvas, { strictCapture }) {
     if (strictCapture && !quality.accepted) {
       resetMetrics();
       setStatus(elements.qualityBadge, '촬영 무효', 'danger');
-      setMessage(`촬영 순간 자세가 바뀌었습니다: ${quality.reasons.join(' · ')}`, 'danger');
+      setMessage(`촬영 순간 조건이 바뀌었습니다: ${quality.reasons.join(' · ')}`, 'danger');
       return;
     }
 
-    lastAnalysisSource = canvas;
+    copyCanvas(canvas, elements.captureCanvas);
+    lastAnalysisSource = elements.captureCanvas;
     renderResult(canvas, landmarks, measurement, quality);
     updateMetrics(canvas, measurement, quality, sexPrior);
     setStatus(elements.qualityBadge, quality.accepted ? '측정 가능' : '재촬영 권장', quality.accepted ? 'success' : 'danger');
@@ -668,7 +960,14 @@ function renderResult(sourceCanvas, landmarks, measurement, quality) {
   const context = canvas.getContext('2d');
   context.drawImage(sourceCanvas, 0, 0);
   const scale = Math.max(1, Math.min(canvas.width, canvas.height) / 700);
-  const { leftCenter, rightCenter, leftBoundary, rightBoundary } = measurement.points;
+  const {
+    leftCenter,
+    rightCenter,
+    leftBoundary,
+    rightBoundary,
+    mediaPipeLeftCenter,
+    mediaPipeRightCenter,
+  } = measurement.points;
 
   context.lineCap = 'round';
   context.lineWidth = 3 * scale;
@@ -678,9 +977,16 @@ function renderResult(sourceCanvas, landmarks, measurement, quality) {
   context.lineTo(rightCenter.x, rightCenter.y);
   context.stroke();
 
+  drawPoint(context, mediaPipeLeftCenter, 'rgba(255,255,255,.72)', 3.2 * scale);
+  drawPoint(context, mediaPipeRightCenter, 'rgba(255,255,255,.72)', 3.2 * scale);
   drawPoint(context, leftCenter, '#2e90fa', 6 * scale);
   drawPoint(context, rightCenter, '#2e90fa', 6 * scale);
   [...leftBoundary, ...rightBoundary].forEach((point) => drawPoint(context, point, '#f79009', 4 * scale));
+
+  for (const pupil of [measurement.pupilRefinement?.left, measurement.pupilRefinement?.right]) {
+    if (!pupil?.ellipse) continue;
+    drawEllipse(context, pupil.ellipse, pupil.source === 'opencv' ? '#7f56d9' : '#fdb022', 2.5 * scale);
+  }
 
   context.fillStyle = 'rgba(255,255,255,0.55)';
   for (const index of [33, 133, 159, 145, 362, 263, 386, 374, 1]) {
@@ -702,6 +1008,30 @@ function drawPoint(context, point, color, radius) {
   context.fill();
 }
 
+function drawEllipse(context, ellipse, color, lineWidth) {
+  context.save();
+  context.translate(ellipse.x, ellipse.y);
+  context.rotate((ellipse.angle || 0) * Math.PI / 180);
+  context.strokeStyle = color;
+  context.lineWidth = lineWidth;
+  context.beginPath();
+  context.ellipse(0, 0, ellipse.width / 2, ellipse.height / 2, 0, 0, Math.PI * 2);
+  context.stroke();
+  context.restore();
+}
+
+function pupilSummary(pupilRefinement) {
+  if (!pupilRefinement) return '--';
+  const labels = {
+    opencv: 'OpenCV',
+    blended: '융합',
+    mediapipe: 'MediaPipe',
+  };
+  const left = pupilRefinement.left;
+  const right = pupilRefinement.right;
+  return `좌 ${labels[left.source]} ${(left.confidence * 100).toFixed(0)}% · 우 ${labels[right.source]} ${(right.confidence * 100).toFixed(0)}%`;
+}
+
 function updateMetrics(canvas, measurement, quality, sexPrior) {
   elements.pdValue.textContent = sexPrior.adjustedPdMm.toFixed(1);
   elements.rawPdValue.textContent = `${measurement.pdMm.toFixed(1)} mm`;
@@ -711,6 +1041,15 @@ function updateMetrics(canvas, measurement, quality, sexPrior) {
   elements.pdPxValue.textContent = `${measurement.pdPx.toFixed(1)} px`;
   elements.irisPxValue.textContent = `${measurement.meanIrisPx.toFixed(1)} px`;
   elements.irisDiffValue.textContent = `${(measurement.irisDifferenceRatio * 100).toFixed(1)}%`;
+  elements.pupilValue.textContent = pupilSummary(measurement.pupilRefinement);
+  const eyeQuality = measurement.eyeImageQuality;
+  elements.eyeQualityValue.textContent = eyeQuality
+    ? `초점 ${eyeQuality.left.sharpness.toFixed(0)} / ${eyeQuality.right.sharpness.toFixed(0)} · 밝기 ${eyeQuality.meanBrightness.toFixed(0)}`
+    : '--';
+  elements.burstValue.textContent = measurement.burst
+    ? `${measurement.burst.frameCount}장 중앙값 · ${measurement.burst.values.map((value) => value.toFixed(1)).join(' / ')}mm · 범위 ${measurement.burst.spreadMm.toFixed(2)}mm`
+    : '단일 프레임';
+  elements.captureMethodValue.textContent = measurement.captureMeta?.method || '--';
   const { yaw, pitch, roll } = measurement.pose;
   elements.poseValue.textContent = [yaw, pitch, roll].every(Number.isFinite)
     ? `${yaw.toFixed(1)}° / ${pitch.toFixed(1)}° / ${roll.toFixed(1)}°`
@@ -734,6 +1073,10 @@ function resetMetrics() {
   elements.pdPxValue.textContent = '-- px';
   elements.irisPxValue.textContent = '-- px';
   elements.irisDiffValue.textContent = '--';
+  elements.pupilValue.textContent = '--';
+  elements.eyeQualityValue.textContent = '--';
+  elements.burstValue.textContent = '--';
+  elements.captureMethodValue.textContent = '--';
   elements.poseValue.textContent = '--';
   elements.perspectiveValue.textContent = '--';
   elements.depthEstimateValue.textContent = '--';
@@ -744,13 +1087,22 @@ function resetMetrics() {
 }
 
 async function reanalyzeLastImage() {
-  if (lastAnalysisSource) await analyzeCanvas(lastAnalysisSource, { strictCapture: false });
+  if (lastAnalysisSource) await analyzeCanvas(lastAnalysisSource, { strictCapture: false, captureMethod: 'reanalyzed image' });
 }
 
-for (const input of [elements.irisReferenceInput, elements.priorStrengthInput, elements.maxYawInput, elements.maxPitchInput, elements.maxRollInput]) {
+for (const input of [
+  elements.irisReferenceInput,
+  elements.priorStrengthInput,
+  elements.maxYawInput,
+  elements.maxPitchInput,
+  elements.maxRollInput,
+  elements.minIrisPixelsInput,
+  elements.minEyeSharpnessInput,
+  elements.minEyeBrightnessInput,
+  elements.maxEyeBrightnessInput,
+]) {
   input.addEventListener('change', reanalyzeLastImage);
 }
-
 
 elements.sexInput.addEventListener('change', () => {
   updateSexPriorHint();
@@ -767,4 +1119,5 @@ elements.galleryInput.addEventListener('change', (event) => loadFile(event.targe
 window.addEventListener('pagehide', stopCamera);
 
 updateSexPriorHint();
-initializeModel();
+void initializeOpenCv();
+void initializeModel();

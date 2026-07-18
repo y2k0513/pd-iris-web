@@ -14,7 +14,10 @@
           <h1>홍채 기준 PD 추정</h1>
           <p class="hero-copy">반복성이 좋은 2D 홍채 비율로 PD를 계산하고, MediaPipe 상대 3D 정보는 원근과 촬영 품질 검증에 사용합니다.</p>
         </div>
-        <div id="modelStatus" class="status-pill pending">모델 준비 중</div>
+        <div class="status-group">
+          <div id="modelStatus" class="status-pill pending">모델 준비 중</div>
+          <div id="opencvStatus" class="status-pill pending">동공 보정 준비 중</div>
+        </div>
       </header>
 
       <section class="grid">
@@ -57,6 +60,7 @@
             <span id="poseCheck">자세 --</span>
             <span id="perspectiveCheck">원근 --</span>
             <span id="gazeCheck">시선 --</span>
+            <span id="eyeQualityCheck">눈 품질 --</span>
             <span id="stabilityCheck">안정성 --</span>
           </div>
 
@@ -71,7 +75,7 @@
           </div>
 
           <div class="web-limit-note">
-            촬영 준비를 누른 뒤 자세 조건을 맞추면 1초간 유지 여부를 확인하고 자동 촬영합니다. 원본 PD는 2D 홍채 비율로 계산하고, 성별 분포 중심에서 멀어질수록 soft prior loss를 적용합니다. 상대 3D는 원근 이상 검증에만 사용합니다.
+            촬영 준비를 누른 뒤 자세와 눈 초점 조건을 맞추면 1초 후 3프레임을 자동 촬영합니다. 고해상도 사진 API를 우선 사용하고, 눈 crop에서 OpenCV 타원 fitting으로 동공 중심을 보정한 뒤 3장 PD 중앙값을 사용합니다. 검출 신뢰도가 낮으면 MediaPipe 홍채 중심으로 자동 fallback합니다.
           </div>
           <p class="privacy-note">사진은 브라우저 안에서만 처리되며 서버로 전송하지 않습니다.</p>
         </article>
@@ -106,6 +110,10 @@
             <div><dt>눈 사이 거리</dt><dd id="pdPxValue">-- px</dd></div>
             <div><dt>평균 홍채 지름</dt><dd id="irisPxValue">-- px</dd></div>
             <div><dt>좌/우 홍채 차이</dt><dd id="irisDiffValue">--</dd></div>
+            <div><dt>동공 중심 검출</dt><dd id="pupilValue">--</dd></div>
+            <div><dt>눈 초점 / 밝기</dt><dd id="eyeQualityValue">--</dd></div>
+            <div><dt>버스트 측정</dt><dd id="burstValue">--</dd></div>
+            <div><dt>촬영 방식</dt><dd id="captureMethodValue">--</dd></div>
             <div><dt>Yaw / Pitch / Roll</dt><dd id="poseValue">--</dd></div>
             <div><dt>원근 대칭 / 시선</dt><dd id="perspectiveValue">--</dd></div>
             <div><dt>2D 최종 / 3D 참고</dt><dd id="depthEstimateValue">--</dd></div>
@@ -127,10 +135,14 @@
           <label>최대 Yaw<span><input id="maxYawInput" type="number" min="1" max="20" step="1" value="6" />°</span></label>
           <label>최대 Pitch<span><input id="maxPitchInput" type="number" min="1" max="20" step="1" value="7" />°</span></label>
           <label>최대 Roll<span><input id="maxRollInput" type="number" min="1" max="20" step="1" value="5" />°</span></label>
+          <label>최소 홍채 지름<span><input id="minIrisPixelsInput" type="number" min="10" max="50" step="1" value="20" /> px</span></label>
+          <label>최소 눈 선명도<span><input id="minEyeSharpnessInput" type="number" min="5" max="300" step="5" value="35" /></span></label>
+          <label>최소 눈 밝기<span><input id="minEyeBrightnessInput" type="number" min="5" max="150" step="5" value="35" /></span></label>
+          <label>최대 눈 밝기<span><input id="maxEyeBrightnessInput" type="number" min="120" max="250" step="5" value="225" /></span></label>
         </div>
       </section>
 
-      <footer><p>원본 측정은 2D 홍채 비율 기반이며 상대 3D는 품질 검사용입니다. 성별 prior는 hard clipping이 아니라 약한 보정이므로 원본 PD도 함께 확인하세요.</p></footer>
+      <footer><p>최종 PD는 2D 홍채 비율과 3프레임 중앙값을 사용합니다. OpenCV 동공 보정은 신뢰도에 따라 적용되며, 실패 시 MediaPipe 중심으로 대체합니다. 상대 3D는 품질 검사용입니다.</p></footer>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SEX_PD_PRIORS,
   applySexPdPrior,
   calculateFraming,
   extractPoseDegrees,
   maxPairwiseDistance,
   maxPairwiseDistance3D,
   measurePd,
+  median,
+  SEX_PD_PRIORS,
   projectionFraction,
 } from './src/measurement.js';
 
@@ -90,18 +91,15 @@ test('maxPairwiseDistance3D includes z depth', () => {
 });
 
 
-test('sex PD prior uses the stated midpoint and has loss 1 at both range boundaries', () => {
+test('sex PD prior loss follows configured center and scale', () => {
   for (const sex of ['male', 'female']) {
     const prior = SEX_PD_PRIORS[sex];
-    const expectedCenter = (prior.minMm + prior.maxMm) / 2;
-    const expectedScale = (prior.maxMm - prior.minMm) / 2;
-
-    assert.equal(prior.centerMm, expectedCenter);
-    assert.equal(prior.scaleMm, expectedScale);
-
     for (const rawPdMm of [prior.minMm, prior.maxMm]) {
       const result = applySexPdPrior({ rawPdMm, sex, qualityScore: 100, strength: 0.6 });
-      assert.ok(Math.abs(result.priorLoss - 1) < 1e-12);
+      const expectedLoss = ((rawPdMm - prior.centerMm) / prior.scaleMm) ** 2;
+      assert.ok(Math.abs(result.priorLoss - expectedLoss) < 1e-12);
+      assert.equal(result.centerMm, prior.centerMm);
+      assert.equal(result.scaleMm, prior.scaleMm);
     }
   }
 });
@@ -119,4 +117,41 @@ test('zero prior strength preserves raw PD exactly', () => {
   const result = applySexPdPrior({ rawPdMm: 72, sex: 'male', qualityScore: 50, strength: 0 });
   assert.equal(result.adjustedPdMm, 72);
   assert.equal(result.priorWeight, 0);
+});
+
+
+test('median returns the middle burst PD', () => {
+  assert.equal(median([64.2, 63.8, 70.0]), 64.2);
+  assert.equal(median([60, 62]), 61);
+});
+
+test('refined pupil centers replace MediaPipe centers without changing iris scale', () => {
+  const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  const width = 1000;
+  const height = 1000;
+  landmarks[468] = { x: 0.375, y: 0.5, z: 0 };
+  landmarks[473] = { x: 0.625, y: 0.5, z: 0 };
+  for (const [index, x, y] of [
+    [469, 0.352, 0.5], [470, 0.375, 0.477], [471, 0.398, 0.5], [472, 0.375, 0.523],
+    [474, 0.602, 0.5], [475, 0.625, 0.477], [476, 0.648, 0.5], [477, 0.625, 0.523],
+    [33, 0.32, 0.5], [133, 0.43, 0.5], [159, 0.375, 0.49], [145, 0.375, 0.51],
+    [362, 0.57, 0.5], [263, 0.68, 0.5], [386, 0.625, 0.49], [374, 0.625, 0.51],
+    [1, 0.5, 0.56],
+  ]) landmarks[index] = { x, y, z: 0 };
+
+  const base = measurePd({ landmarks, width, height, irisReferenceMm: 11.7 });
+  const refined = measurePd({
+    landmarks,
+    width,
+    height,
+    irisReferenceMm: 11.7,
+    centerOverrides: {
+      right: { x: 370, y: 500 },
+      left: { x: 630, y: 500 },
+    },
+  });
+  assert.equal(refined.meanIrisPx, base.meanIrisPx);
+  assert.equal(refined.pdPx, 260);
+  assert.ok(refined.pdMm > base.pdMm);
+  assert.equal(refined.centerSource, 'refined-pupil');
 });

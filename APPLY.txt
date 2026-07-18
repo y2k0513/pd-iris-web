@@ -1,0 +1,12 @@
+1. 이 압축 안의 파일과 폴더를 기존 pd-iris-web 프로젝트 루트에 그대로 덮어씁니다.
+2. PowerShell에서 다음을 실행합니다.
+
+npm test
+npm run build
+npm run dev
+
+3. 확인 후 GitHub 반영:
+
+git add .
+git commit -m "Add OpenCV pupil refinement and burst capture"
+git push

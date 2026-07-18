@@ -7,6 +7,8 @@
   "scripts": {
     "postinstall": "node scripts/copy-wasm.mjs",
     "setup:model": "node scripts/download-model.mjs",
+    "setup:opencv": "node scripts/download-opencv.mjs",
+    "setup:assets": "npm run setup:model && npm run setup:opencv",
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
