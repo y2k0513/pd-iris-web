@@ -90,36 +90,41 @@ test('partial arc fitting reconstructs a circle hidden by an upper eyelid cut', 
 });
 
 test('occlusion-aware selection can prefer a larger partial-arc reconstruction', () => {
-  const result = chooseOcclusionAwarePupilFit([
+  const candidates = [
     {
       type: 'equivalent-circle',
-      score: 0.92,
-      iou: 0.91,
-      centerDistanceRatio: 0.08,
-      width: 60,
+      x: 50,
+      y: 50,
+      width: 40,
+      height: 40,
+      score: 0.82,
+      iou: 0.90,
+      centerDistanceRatio: 0.05,
     },
     {
       type: 'partial-arc-circle',
-      score: 0.82,
-      iou: 0.75,
-      centerDistanceRatio: 0.10,
-      width: 66,
-      radiusExpansionRatio: 1.10,
-      arcCoverage: 0.68,
-      arcPointCount: 52,
-      arcResidualP90: 1.4,
-    },
-  ]);
+      x: 50.5,
+      y: 50.2,
+      width: 44,
+      height: 44,
+      score: 0.72,
+      iou: 0.70,
+      centerDistanceRatio: 0.12,
 
-  assert.equal(result.accepted, true);
-  assert.equal(result.best.type, 'partial-arc-circle');
+      arcCoverage: 0.62,
+      arcPointCount: 18,
+      arcResidualP90: 1.2,
+      arcInlierRatio: 0.78,
+      arcSideBalance: 0.83,
+
+      radiusExpansionRatio: 1.10,
+      topOcclusionDetected: true,
+    },
+  ];
+
+  const selection = chooseOcclusionAwarePupilFit(candidates);
+
   assert.equal(selection.accepted, true);
   assert.equal(selection.best.type, 'partial-arc-circle');
-
-  assert.ok(
-    [
-      'ransac-occlusion-recovery',
-      'partial-arc-recovery',
-    ].includes(selection.reason),
-  );
+  assert.equal(selection.reason, 'ransac-occlusion-recovery');
 });
