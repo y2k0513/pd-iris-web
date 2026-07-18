@@ -22,6 +22,14 @@ const DEFAULT_OPENCV_URLS = [
   'https://docs.opencv.org/4.x/opencv.js',
 ];
 
+
+// Pupil segmentation tuning values.
+// Lower percentile keeps only darker pixels as pupil candidates.
+const PUPIL_THRESHOLD_PERCENTILE = 0.20;
+const PUPIL_THRESHOLD_OFFSET = 4;
+const PUPIL_OPEN_KERNEL_SIZE = 3;
+const PUPIL_CLOSE_KERNEL_SIZE = 5;
+
 let openCvReadyPromise = null;
 const scratchCanvas = document.createElement('canvas');
 const scratchContext = scratchCanvas.getContext('2d', { willReadFrequently: true });
@@ -532,14 +540,24 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         }
       }
     }
-    const darkThreshold = clamp(percentile(irisValues, 0.24) + 4, 12, 145);
+    const darkThreshold = clamp(
+      percentile(irisValues, PUPIL_THRESHOLD_PERCENTILE) + PUPIL_THRESHOLD_OFFSET,
+      12,
+      145,
+    );
 
     binary = new cv.Mat();
     cv.threshold(blurred, binary, darkThreshold, 255, cv.THRESH_BINARY_INV);
     maskedBinary = new cv.Mat();
     cv.bitwise_and(binary, mask, maskedBinary);
-    kernelSmall = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
-    kernelLarge = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    kernelSmall = cv.getStructuringElement(
+      cv.MORPH_ELLIPSE,
+      new cv.Size(PUPIL_OPEN_KERNEL_SIZE, PUPIL_OPEN_KERNEL_SIZE),
+    );
+    kernelLarge = cv.getStructuringElement(
+      cv.MORPH_ELLIPSE,
+      new cv.Size(PUPIL_CLOSE_KERNEL_SIZE, PUPIL_CLOSE_KERNEL_SIZE),
+    );
     opened = new cv.Mat();
     closed = new cv.Mat();
     cv.morphologyEx(maskedBinary, opened, cv.MORPH_OPEN, kernelSmall);
@@ -695,7 +713,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
           {
             key: 'threshold',
             label: '7. 어두운 영역 이진화',
-            description: `홍채 내부 24백분위 기반 임계값 ${darkThreshold}로 어두운 픽셀을 흰색 후보로 변환`,
+            description: `홍채 내부 ${Math.round(PUPIL_THRESHOLD_PERCENTILE * 100)}백분위 기반 임계값 ${darkThreshold}로 어두운 픽셀을 흰색 후보로 변환`,
             canvas: matToCanvas(cv, maskedBinary),
           },
           {
