@@ -617,26 +617,45 @@ function buildFitCandidates(
   });
 
   const contourPoints = contourToPoints(contour);
-  const visibleArcPoints = selectVisiblePupilArcPoints(contourPoints, {
-    irisCenter: localIrisCenter,
-    irisRadius: localIrisRadius,
-    equivalentRadius,
-  });
-  const partialFit = fitPartialArcCircle(visibleArcPoints);
+
+  const visibleArcPoints = selectVisiblePupilArcPoints(
+    contourPoints,
+    {
+      irisCenter: localIrisCenter,
+      irisRadius: localIrisRadius,
+      equivalentRadius,
+      angleBinDegrees: 5,
+    },
+  );
+
+  const partialFit = fitPartialArcCircle(
+    visibleArcPoints,
+    {
+      minPoints: 10,
+      ransacIterations: 200,
+      irisCenter: localIrisCenter,
+      irisRadius: localIrisRadius,
+      equivalentRadius,
+    },
+  );
+
   if (partialFit) {
     const centerDistance = Math.hypot(
       partialFit.x - localIrisCenter.x,
       partialFit.y - localIrisCenter.y,
     );
+
     const minimumRadius = equivalentRadius * 0.92;
+
     const maximumRadius = Math.min(
-      localIrisRadius * 1.04,
-      equivalentRadius * 1.36,
+      localIrisRadius * 1.12,
+      equivalentRadius * 1.40,
     );
+
     if (
       partialFit.radius >= minimumRadius
       && partialFit.radius <= maximumRadius
-      && centerDistance <= localIrisRadius * 0.62
+      && centerDistance <= localIrisRadius * 0.72
     ) {
       candidates.push({
         type: 'partial-arc-circle',
@@ -645,12 +664,31 @@ function buildFitCandidates(
         width: partialFit.radius * 2,
         height: partialFit.radius * 2,
         angle: 0,
+
         arcPointCount: partialFit.pointCount,
-        arcOriginalPointCount: partialFit.originalPointCount,
+        arcOriginalPointCount:
+          partialFit.originalPointCount,
         arcCoverage: partialFit.arcCoverage,
+        arcCoverageDegrees:
+          partialFit.angularCoverageDegrees,
         arcResidualMean: partialFit.meanResidual,
         arcResidualP90: partialFit.p90Residual,
-        radiusExpansionRatio: partialFit.radius / Math.max(1, equivalentRadius),
+        arcInlierRatio: partialFit.inlierRatio,
+        arcSideBalance: partialFit.sideBalance,
+
+        topOcclusionDetected:
+          partialFit.topOcclusionDetected,
+        upperCutSpanRatio:
+          partialFit.upperCutSpanRatio,
+
+        chordRadius: partialFit.chordRadius,
+        chordCenterX: partialFit.chordCenterX,
+        ransacIterations:
+          partialFit.ransacIterations,
+
+        radiusExpansionRatio:
+          partialFit.radius
+          / Math.max(1, equivalentRadius),
       });
     }
   }
@@ -773,21 +811,72 @@ function evaluateFitCandidate(
       localIrisRadius,
     );
     const contrast = clamp((intensity.ringMean - intensity.insideMean) / 70, 0, 1);
-    const arcResidualScore = candidate.type === 'partial-arc-circle'
-      ? clamp(1 - candidate.arcResidualP90 / Math.max(2.5, majorAxis * 0.075), 0, 1)
-      : 0;
-    const arcCoverageScore = candidate.type === 'partial-arc-circle'
-      ? clamp((candidate.arcCoverage - 0.35) / 0.45, 0, 1)
-      : 0;
-    const selectionScore = candidate.type === 'partial-arc-circle'
-      ? clamp(
-        fitScore * 0.72
-          + arcResidualScore * 0.18
-          + arcCoverageScore * 0.10,
-        0,
-        1,
-      )
-      : fitScore;
+    const arcResidualScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          1
+            - candidate.arcResidualP90
+              / Math.max(2.2, majorAxis * 0.045),
+          0,
+          1,
+        )
+        : 0;
+
+    const arcCoverageScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          (candidate.arcCoverage - 0.32) / 0.48,
+          0,
+          1,
+        )
+        : 0;
+
+    const arcSideBalanceScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          (candidate.arcSideBalance - 0.25) / 0.75,
+          0,
+          1,
+        )
+        : 0;
+
+    const arcInlierScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          (candidate.arcInlierRatio - 0.45) / 0.45,
+          0,
+          1,
+        )
+        : 0;
+
+    const centerPriorScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          1 - centerDistanceRatio / 0.70,
+          0,
+          1,
+        )
+        : 0;
+
+    const occlusionBonus =
+      candidate.type === 'partial-arc-circle'
+      && candidate.topOcclusionDetected
+        ? 0.04
+        : 0;
+
+    const selectionScore =
+      candidate.type === 'partial-arc-circle'
+        ? clamp(
+          arcResidualScore * 0.45
+            + arcCoverageScore * 0.20
+            + arcSideBalanceScore * 0.15
+            + centerPriorScore * 0.15
+            + arcInlierScore * 0.05
+            + occlusionBonus,
+          0,
+          1,
+        )
+        : fitScore;
     const confidence = clamp(
       Math.max(selectionScore, selectionScore * 0.90 + contrast * 0.10),
       0,
@@ -808,6 +897,9 @@ function evaluateFitCandidate(
       axisRatio,
       diameterRatio,
       contrast,
+      arcSideBalanceScore,
+      arcInlierScore,
+      centerPriorScore,
       circularity: contourGeometryResult.circularity,
       areaRatio: contourGeometryResult.areaRatio,
     };
@@ -1157,7 +1249,18 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
             label: '10. 원·타원 fitting 결과',
             description: displayCandidate
               ? displayCandidate.type === 'partial-arc-circle'
-                ? `부분 원호 복원 원 선택 · 반지름 ${(displayCandidate.radiusExpansionRatio * 100).toFixed(0)}%로 복원 · 가시 원호 ${(displayCandidate.arcCoverage * 100).toFixed(0)}% · P90 오차 ${displayCandidate.arcResidualP90.toFixed(1)}px · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 회색 점선=면적 원, 보라=복원 원, 파랑=최종 중심`
+                ? [
+                  'RANSAC 부분 원호 복원 원 선택',
+                  `반지름 ${(displayCandidate.radiusExpansionRatio * 100).toFixed(0)}%`,
+                  `가시 원호 ${(displayCandidate.arcCoverageDegrees || displayCandidate.arcCoverage * 360).toFixed(0)}°`,
+                  `inlier ${(displayCandidate.arcInlierRatio * 100).toFixed(0)}%`,
+                  `좌우 균형 ${(displayCandidate.arcSideBalance * 100).toFixed(0)}%`,
+                  `P90 오차 ${displayCandidate.arcResidualP90.toFixed(1)}px`,
+                  displayCandidate.topOcclusionDetected
+                    ? '위쪽 눈꺼풀 가림 감지'
+                    : '명확한 위쪽 가림 없음',
+                  '회색 점선=면적 원, 보라=복원 원, 파랑=최종 중심',
+                ].join(' · ')
                 : `${displayCandidate.type} 선택 · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 적합도 ${(displayCandidate.score * 100).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
               : '유효한 fitting 후보가 없어 MediaPipe 홍채 중심을 사용',
             canvas: finalOverlay,

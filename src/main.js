@@ -208,7 +208,7 @@ async function initializeModel() {
 
     activeMode = 'VIDEO';
     setStatus(elements.modelStatus, `${useLocalModel ? '로컬 모델' : '모델'} 준비됨 · ${activeDelegate}`, 'success');
-    setMessage('카메라를 시작한 뒤 얼굴을 프레임 중앙에 맞추세요.', 'info');
+    setMessage('카메라를 시작한 뒤 휴대폰을 얼굴에서 약 30~40cm 떨어뜨리고 얼굴을 프레임 중앙에 맞추세요.', 'info');
   } catch (error) {
     console.error(error);
     setStatus(elements.modelStatus, '모델 로드 실패', 'danger');
@@ -226,8 +226,8 @@ function getConfig() {
     requirePose: true,
     maxIrisDifferenceRatio: 0.10,
     minIrisPixels: Number(elements.minIrisPixelsInput.value) || 20,
-    minFaceHeightRatio: 0.40,
-    maxFaceHeightRatio: 0.72,
+    minFaceHeightRatio: 0.34,
+    maxFaceHeightRatio: 0.64,
     maxFaceCenterOffsetX: 0.10,
     maxFaceCenterOffsetY: 0.12,
     maxGazeOffset: 0.28,
@@ -624,8 +624,8 @@ function toggleAutoCapture() {
   validHoldStartedAt = null;
 
   if (captureArmed) {
-    setMessage('자세와 눈 초점 조건을 맞춘 채 유지하면 1초 뒤 3프레임을 자동 촬영합니다.', 'info');
-    elements.liveStatus.textContent = '얼굴을 맞추세요 — 조건 충족 후 1초 자동촬영';
+    setMessage('휴대폰을 얼굴에서 약 30~40cm 떨어뜨린 뒤 자세와 눈 초점 조건을 유지하면 1초 후 3프레임을 자동 촬영합니다.', 'info');
+    elements.liveStatus.textContent = '30~40cm 거리에서 얼굴을 맞추세요 — 조건 충족 후 1초 자동촬영';
   } else {
     setMessage('자동촬영을 취소했습니다.', 'info');
     elements.liveStatus.textContent = latestLiveState?.ready
