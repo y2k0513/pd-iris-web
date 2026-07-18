@@ -31,8 +31,10 @@ const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 18;
 // A higher binary percentile/offset includes moderately dark pupil pixels,
 // rather than keeping only the very darkest pixels.
-const PUPIL_THRESHOLD_PERCENTILE = 0.34;
-const PUPIL_THRESHOLD_OFFSET = 6;
+const PUPIL_THRESHOLD_PERCENTILE = 0.40;
+const PUPIL_THRESHOLD_OFFSET = 8;
+const PUPIL_THRESHOLD_MIN = 12;
+const PUPIL_THRESHOLD_MAX = 170;
 const PUPIL_OPEN_KERNEL_SIZE = 3;
 const PUPIL_CLOSE_KERNEL_SIZE = 5;
 const PUPIL_HOLE_MAX_AREA_RATIO = 0.02;
@@ -583,8 +585,8 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
     const irisValues = collectCircularValues(blurred, localIrisCenter, localIrisRadius);
     const darkThreshold = clamp(
       percentile(irisValues, PUPIL_THRESHOLD_PERCENTILE) + PUPIL_THRESHOLD_OFFSET,
-      12,
-      145,
+      PUPIL_THRESHOLD_MIN,
+      PUPIL_THRESHOLD_MAX,
     );
 
     binary = new cv.Mat();
