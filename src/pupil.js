@@ -1,3 +1,5 @@
+import { fillSmallBlackHoles4Connected } from './binary.js';
+
 const EYE_DEFINITIONS = Object.freeze({
   right: Object.freeze({
     outer: 33,
@@ -22,13 +24,15 @@ const DEFAULT_OPENCV_URLS = [
   'https://docs.opencv.org/4.x/opencv.js',
 ];
 
-
 // Pupil segmentation tuning values.
 // Lower percentile keeps only darker pixels as pupil candidates.
 const PUPIL_THRESHOLD_PERCENTILE = 0.20;
 const PUPIL_THRESHOLD_OFFSET = 4;
 const PUPIL_OPEN_KERNEL_SIZE = 3;
 const PUPIL_CLOSE_KERNEL_SIZE = 5;
+const PUPIL_HOLE_MAX_AREA_RATIO = 0.02;
+const PUPIL_HOLE_MAX_AREA_MIN = 8;
+const PUPIL_HOLE_MAX_AREA_MAX = 220;
 
 let openCvReadyPromise = null;
 const scratchCanvas = document.createElement('canvas');
@@ -503,6 +507,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
   let maskedBinary;
   let opened;
   let closed;
+  let holeFilled;
   let kernelSmall;
   let kernelLarge;
   let contours;
@@ -563,11 +568,24 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
     cv.morphologyEx(maskedBinary, opened, cv.MORPH_OPEN, kernelSmall);
     cv.morphologyEx(opened, closed, cv.MORPH_CLOSE, kernelLarge);
 
+    const irisArea = Math.PI * localIrisRadius * localIrisRadius;
+    const maxHolePixels = clamp(
+      Math.round(irisArea * PUPIL_HOLE_MAX_AREA_RATIO),
+      PUPIL_HOLE_MAX_AREA_MIN,
+      PUPIL_HOLE_MAX_AREA_MAX,
+    );
+    const holeFill = fillSmallBlackHoles4Connected(
+      closed.data,
+      closed.cols,
+      closed.rows,
+      maxHolePixels,
+    );
+    holeFilled = closed.clone();
+    holeFilled.data.set(holeFill.data);
+
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
-    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    const irisArea = Math.PI * localIrisRadius * localIrisRadius;
+    cv.findContours(holeFilled, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     let best = null;
 
     for (let index = 0; index < contours.size(); index += 1) {
@@ -673,6 +691,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         targetWidth,
         localIrisDiameter,
         contourCount: contours.size(),
+        holeFill,
         stages: [
           {
             key: 'crop',
@@ -723,8 +742,14 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
             canvas: matToCanvas(cv, closed),
           },
           {
+            key: 'hole-fill',
+            label: '9. 작은 내부 구멍 제거',
+            description: `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 구멍, ${holeFill.filledPixelCount}px를 채움 · ${maxHolePixels}px 이하만 제거`,
+            canvas: matToCanvas(cv, holeFilled),
+          },
+          {
             key: 'result',
-            label: '9. 타원 fitting 결과',
+            label: '10. 타원 fitting 결과',
             description: '주황 원=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심',
             canvas: finalOverlay,
           },
@@ -748,7 +773,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
   } finally {
     for (const mat of [
       sourceMat, gray, gamma, enhanced, blurred, mask, binary, maskedBinary,
-      opened, closed, kernelSmall, kernelLarge, contours, hierarchy,
+      opened, closed, holeFilled, kernelSmall, kernelLarge, contours, hierarchy,
     ]) {
       try { mat?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
     }
