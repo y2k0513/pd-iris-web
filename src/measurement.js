@@ -345,77 +345,154 @@ export function measurePd({
   const mmPerPixel = irisReferenceMm / meanIrisPx;
   const pdMm2D = pdPx * mmPerPixel;
 
-  // 3D 기준값은 MediaPipe 상대 z를 포함한 얼굴 메시로 계산한다.
-  // 최종 PD에는 섞지 않고 원근 및 품질 검증에만 사용한다.
-  const rightCenter3D = toRelative3D(
-    landmarks[LANDMARKS.rightIrisCenter],
-    width,
-    height,
-  );
+  /*
+   * 2D/3D 비교는 같은 중심과 같은 기준 지름을 써야 한다.
+   *
+   * 최종 촬영:
+   * - x/y: 보라색 원 중심
+   * - z: MediaPipe 상대 깊이
+   * - 기준 지름: 3.5% 확대된 보라색 원 평균 지름
+   *
+   * 라이브 프리뷰 및 기존 테스트:
+   * - 기존 MediaPipe 상대 3D 계산 유지
+   */
+  let pd3DUnits;
+  let rightIris3DUnits;
+  let leftIris3DUnits;
+  let meanIris3DUnits;
+  let pdMm3D;
 
-  const leftCenter3D = toRelative3D(
-    landmarks[LANDMARKS.leftIrisCenter],
-    width,
-    height,
-  );
-
-  const rightBoundary3D =
-    LANDMARKS.rightIrisBoundary.map(
-      (index) => toRelative3D(
-        landmarks[index],
-        width,
-        height,
-      ),
+  if (hasPurpleDiameterOverrides) {
+    const rightMediaPipe3D = toRelative3D(
+      landmarks[LANDMARKS.rightIrisCenter],
+      width,
+      height,
     );
 
-  const leftBoundary3D =
-    LANDMARKS.leftIrisBoundary.map(
-      (index) => toRelative3D(
-        landmarks[index],
-        width,
-        height,
-      ),
+    const leftMediaPipe3D = toRelative3D(
+      landmarks[LANDMARKS.leftIrisCenter],
+      width,
+      height,
     );
 
-  const pd3DUnits = distance3D(
-    leftCenter3D,
-    rightCenter3D,
-  );
+    /*
+     * rightCenter/leftCenter는 이 경로에서
+     * main.js가 전달한 보라색 원 중심이다.
+     *
+     * toRelative3D와 같은 좌표계가 되도록
+     * 이미지 중앙을 원점으로 변경한다.
+     */
+    const rightPurpleCenter3D = {
+      x: rightCenter.x - width / 2,
+      y: rightCenter.y - height / 2,
+      z: rightMediaPipe3D.z,
+    };
 
-  const rightIris3DUnits =
-    maxPairwiseDistance3D(
-      rightBoundary3D,
+    const leftPurpleCenter3D = {
+      x: leftCenter.x - width / 2,
+      y: leftCenter.y - height / 2,
+      z: leftMediaPipe3D.z,
+    };
+
+    pd3DUnits = distance3D(
+      leftPurpleCenter3D,
+      rightPurpleCenter3D,
     );
 
-  const leftIris3DUnits =
-    maxPairwiseDistance3D(
-      leftBoundary3D,
+    /*
+     * 2D와 동일한 보라색 원 기준 스케일 사용.
+     * rightIrisPx와 leftIrisPx는 이 경로에서
+     * 3.5% 확대된 보라색 원 지름이다.
+     */
+    rightIris3DUnits = rightIrisPx;
+    leftIris3DUnits = leftIrisPx;
+
+    meanIris3DUnits =
+      (
+        leftIris3DUnits
+        + rightIris3DUnits
+      ) / 2;
+
+    pdMm3D =
+      pd3DUnits
+      * mmPerPixel;
+  } else {
+    /*
+     * 보라색 원이 없는 라이브 프리뷰와 단위 테스트는
+     * 기존 MediaPipe 상대 3D 계산을 유지한다.
+     */
+    const rightCenter3D = toRelative3D(
+      landmarks[LANDMARKS.rightIrisCenter],
+      width,
+      height,
     );
 
-  const meanIris3DUnits =
-    (
-      leftIris3DUnits
-      + rightIris3DUnits
-    ) / 2;
-
-  if (!(meanIris3DUnits > 0)) {
-    throw new Error(
-      '3D 홍채 지름 계산에 실패했습니다.',
+    const leftCenter3D = toRelative3D(
+      landmarks[LANDMARKS.leftIrisCenter],
+      width,
+      height,
     );
+
+    const rightBoundary3D =
+      LANDMARKS.rightIrisBoundary.map(
+        (index) => toRelative3D(
+          landmarks[index],
+          width,
+          height,
+        ),
+      );
+
+    const leftBoundary3D =
+      LANDMARKS.leftIrisBoundary.map(
+        (index) => toRelative3D(
+          landmarks[index],
+          width,
+          height,
+        ),
+      );
+
+    pd3DUnits = distance3D(
+      leftCenter3D,
+      rightCenter3D,
+    );
+
+    rightIris3DUnits =
+      maxPairwiseDistance3D(
+        rightBoundary3D,
+      );
+
+    leftIris3DUnits =
+      maxPairwiseDistance3D(
+        leftBoundary3D,
+      );
+
+    meanIris3DUnits =
+      (
+        leftIris3DUnits
+        + rightIris3DUnits
+      ) / 2;
+
+    if (!(meanIris3DUnits > 0)) {
+      throw new Error(
+        '3D 홍채 지름 계산에 실패했습니다.',
+      );
+    }
+
+    pdMm3D =
+      pd3DUnits
+      * irisReferenceMm
+      / meanIris3DUnits;
   }
-
-  const pdMm3D =
-    pd3DUnits
-    * irisReferenceMm
-    / meanIris3DUnits;
 
   const estimateMean =
     (pdMm2D + pdMm3D) / 2;
 
   const disagreementRatio =
-    Math.abs(
-      pdMm3D - pdMm2D,
-    ) / estimateMean;
+    estimateMean > 0
+      ? Math.abs(
+        pdMm3D - pdMm2D,
+      ) / estimateMean
+      : 0;
 
   // 최종 PD는 반복성이 더 좋은 2D 홍채 비율값을 사용한다.
   // 상대 3D 값은 최종값에 섞지 않고 원근/품질 검증에만 사용한다.
