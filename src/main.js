@@ -21,10 +21,11 @@ const STABLE_FRAME_TARGET = 4;
 const MAX_PD_VARIATION_RATIO = 0.025;
 const AUTO_CAPTURE_DELAY_MS = 1000;
 const VIDEO_CAPTURE_DURATION_MS = 1000;
-const VIDEO_CAPTURE_SAMPLE_COUNT = 10;
-const VIDEO_ANALYSIS_FRAME_COUNT = 6;
-const MIN_VIDEO_VALID_FRAMES = 4;
-const VIDEO_FRAME_MAX_DIMENSION = 1440;
+const VIDEO_CAPTURE_SAMPLE_COUNT = 8;
+const VIDEO_ANALYSIS_FRAME_COUNT = 4;
+const MIN_VIDEO_VALID_FRAMES = 3;
+const VIDEO_FRAME_MAX_DIMENSION = 1280;
+const OPENCV_READY_TIMEOUT_MS = 8000;
 const MAX_CAPTURE_DIMENSION = 4096;
 
 const elements = {
@@ -118,6 +119,26 @@ let openCvPromise = null;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId = null;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(message)),
+      timeoutMs,
+    );
+  });
+
+  return Promise.race([
+    promise,
+    timeoutPromise,
+  ]).finally(() => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  });
 }
 
 function setStatus(element, text, kind) {
@@ -553,7 +574,7 @@ function updateLiveIndicators(measurement, quality, ready, variation, remainingM
   if (captureArmed) {
     if (ready && remainingMs !== null) {
       elements.liveGuide.className = 'face-guide live-guide ready';
-      elements.liveStatus.textContent = `자세 유지 — ${(remainingMs / 1000).toFixed(1)}초 후 3장 자동촬영`;
+      elements.liveStatus.textContent = `자세 유지 — ${(remainingMs / 1000).toFixed(1)}초 후 1초 영상수집`;
     } else {
       elements.liveGuide.className = 'face-guide live-guide checking';
       elements.liveStatus.textContent = '움직이지 말고 자세를 유지하세요';
@@ -580,7 +601,7 @@ function syncCaptureButton() {
   elements.captureButton.classList.toggle('armed', captureArmed);
 
   if (autoCaptureInProgress) {
-    elements.captureButton.textContent = '3장 촬영 및 분석 중';
+    elements.captureButton.textContent = '영상 촬영 및 분석 중';
   } else if (captureArmed) {
     elements.captureButton.textContent = '자동촬영 취소';
   } else {
@@ -784,6 +805,40 @@ async function captureOneSecondVideoWindow() {
       continue;
     }
 
+    /*
+     * 이미 VIDEO 모드인 Face Landmarker로 현재 프레임의
+     * 랜드마크를 여기서 함께 확보한다.
+     *
+     * 이후 정밀 분석에서 IMAGE 모드로 전환하거나
+     * 같은 고해상도 프레임을 다시 얼굴 검출하지 않는다.
+     */
+    const videoTimestamp = Math.max(
+      performance.now(),
+      lastLiveAnalysisAt + 1,
+    );
+
+    lastLiveAnalysisAt = videoTimestamp;
+
+    const videoResult =
+      faceLandmarker.detectForVideo(
+        elements.cameraVideo,
+        videoTimestamp,
+      );
+
+    if (
+      videoResult.faceLandmarks.length !== 1
+    ) {
+      continue;
+    }
+
+    const landmarks =
+      videoResult.faceLandmarks[0];
+
+    const matrix =
+      videoResult
+        .facialTransformationMatrixes
+        ?.[0];
+
     const capture =
       captureVideoFrame();
 
@@ -791,10 +846,13 @@ async function captureOneSecondVideoWindow() {
       '1s video stream sample '
       + (index + 1);
 
+    capture.landmarks = landmarks;
+    capture.matrix = matrix;
+
     const score =
       scoreVideoCandidate(
         capture.canvas,
-        referenceLandmarks,
+        landmarks,
       );
 
     candidates.push({
@@ -952,6 +1010,11 @@ async function captureCurrentFrame() {
   validHoldStartedAt = null;
   syncCaptureButton();
 
+  elements.resultCanvas.hidden = true;
+  elements.resultPlaceholder.hidden = false;
+  elements.resultPlaceholder.textContent =
+    '1초 영상 프레임 수집 중...';
+
   setMessage(
     '1초간 영상 프레임을 수집합니다. 자세를 유지하세요.',
     'info',
@@ -992,6 +1055,12 @@ async function captureCurrentFrame() {
       '촬영 무효',
       'danger',
     );
+
+    elements.resultCanvas.hidden = true;
+    elements.resultPlaceholder.hidden = false;
+    elements.resultPlaceholder.textContent =
+      '영상 수집 또는 분석 실패: '
+      + error.message;
 
     setMessage(
       '영상 수집 또는 분석 실패: '
@@ -1053,14 +1122,40 @@ async function loadFile(file) {
   }
 }
 
-async function analyzeFrame(canvas, cv, captureMethod = 'unknown') {
-  const result = faceLandmarker.detect(canvas);
-  if (result.faceLandmarks.length !== 1) {
-    throw new Error(result.faceLandmarks.length === 0 ? '얼굴을 찾지 못했습니다.' : '한 명의 얼굴만 촬영해야 합니다.');
-  }
+async function analyzeFrame(
+  canvas,
+  cv,
+  captureMethod = 'unknown',
+  precomputed = null,
+) {
+  let landmarks =
+    precomputed?.landmarks;
 
-  const landmarks = result.faceLandmarks[0];
-  const matrix = result.facialTransformationMatrixes?.[0];
+  let matrix =
+    precomputed?.matrix;
+
+  if (!landmarks) {
+    const result =
+      faceLandmarker.detect(canvas);
+
+    if (
+      result.faceLandmarks.length !== 1
+    ) {
+      throw new Error(
+        result.faceLandmarks.length === 0
+          ? '얼굴을 찾지 못했습니다.'
+          : '한 명의 얼굴만 촬영해야 합니다.',
+      );
+    }
+
+    landmarks =
+      result.faceLandmarks[0];
+
+    matrix =
+      result
+        .facialTransformationMatrixes
+        ?.[0];
+  }
   const config = getConfig();
   const eyeImageQuality = measureEyeImageQuality(canvas, landmarks, canvas.width, canvas.height);
   const pupilRefinement = refinePupilCenters({
@@ -1200,10 +1295,48 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
     return;
   }
 
-  setStatus(elements.qualityBadge, captures.length + '프레임 정밀 분석 중', 'pending');
+  setStatus(
+    elements.qualityBadge,
+    captures.length + '프레임 정밀 분석 중',
+    'pending',
+  );
+
+  elements.resultCanvas.hidden = true;
+  elements.resultPlaceholder.hidden = false;
+  elements.resultPlaceholder.textContent =
+    '영상 프레임을 정밀 분석하고 있습니다.';
+
+  const hasPrecomputedVideoLandmarks =
+    captures.every(
+      (capture) =>
+        Array.isArray(capture.landmarks),
+    );
+
+  let switchedToImageMode = false;
+
   try {
-    await setModelMode('IMAGE');
-    const cv = await getOpenCvOptional();
+    if (!hasPrecomputedVideoLandmarks) {
+      await withTimeout(
+        setModelMode('IMAGE'),
+        8000,
+        'MediaPipe IMAGE 모드 전환 시간이 초과되었습니다.',
+      );
+
+      switchedToImageMode = true;
+    }
+
+    const cv = await withTimeout(
+      getOpenCvOptional(),
+      OPENCV_READY_TIMEOUT_MS,
+      'OpenCV 준비 시간이 초과되었습니다.',
+    );
+
+    if (!cv?.Mat) {
+      throw new Error(
+        'OpenCV 동공 검출을 사용할 수 없습니다.',
+      );
+    }
+
     const analyses = [];
     const failures = [];
 
@@ -1241,6 +1374,12 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
             capture.canvas,
             cv,
             capture.method,
+            {
+              landmarks:
+                capture.landmarks,
+              matrix:
+                capture.matrix,
+            },
           ),
         );
       } catch (error) {
@@ -1356,10 +1495,39 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
   } catch (error) {
     console.error(error);
     resetMetrics();
-    setStatus(elements.qualityBadge, '촬영 무효', 'danger');
-    setMessage(error.message, 'danger');
+
+    elements.resultCanvas.hidden = true;
+    elements.resultPlaceholder.hidden = false;
+    elements.resultPlaceholder.textContent =
+      '분석 실패: ' + error.message;
+
+    setStatus(
+      elements.qualityBadge,
+      '촬영 무효',
+      'danger',
+    );
+
+    setMessage(
+      error.message,
+      'danger',
+    );
   } finally {
-    await setModelMode('VIDEO');
+    if (switchedToImageMode) {
+      try {
+        await withTimeout(
+          setModelMode('VIDEO'),
+          8000,
+          'MediaPipe VIDEO 모드 복귀 시간이 초과되었습니다.',
+        );
+      } catch (error) {
+        console.error(
+          'VIDEO mode restore failed.',
+          error,
+        );
+
+        activeMode = 'VIDEO';
+      }
+    }
   }
 }
 
