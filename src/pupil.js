@@ -31,10 +31,10 @@ const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 18;
 // A higher binary percentile/offset includes moderately dark pupil pixels,
 // rather than keeping only the very darkest pixels.
-const PUPIL_THRESHOLD_PERCENTILE = 0.40;
-const PUPIL_THRESHOLD_OFFSET = 8;
+const PUPIL_THRESHOLD_PERCENTILE = 0.45;
+const PUPIL_THRESHOLD_OFFSET = 10;
 const PUPIL_THRESHOLD_MIN = 12;
-const PUPIL_THRESHOLD_MAX = 170;
+const PUPIL_THRESHOLD_MAX = 180;
 const PUPIL_OPEN_KERNEL_SIZE = 3;
 const PUPIL_CLOSE_KERNEL_SIZE = 5;
 const PUPIL_HOLE_MAX_AREA_RATIO = 0.02;
