@@ -46,3 +46,72 @@ test('fit selection rejects a badly displaced component', () => {
   assert.equal(result.accepted, false);
   assert.equal(result.reason, 'below-threshold');
 });
+
+import {
+  chooseOcclusionAwarePupilFit,
+  fitPartialArcCircle,
+  selectVisiblePupilArcPoints,
+} from './src/fitting.js';
+
+test('partial arc fitting reconstructs a circle hidden by an upper eyelid cut', () => {
+  const center = { x: 80, y: 70 };
+  const radius = 32;
+  const contour = [];
+
+  for (let degree = 0; degree < 360; degree += 3) {
+    const angle = degree * Math.PI / 180;
+    const x = center.x + radius * Math.cos(angle);
+    const y = center.y + radius * Math.sin(angle);
+    const upperCentralOcclusion = y < center.y - 8 && Math.abs(x - center.x) < 24;
+    if (!upperCentralOcclusion) {
+      const deterministicNoise = ((degree % 9) - 4) * 0.035;
+      contour.push({
+        x: x + deterministicNoise,
+        y: y - deterministicNoise,
+      });
+    }
+  }
+
+  // Add a flat eyelid edge that should be rejected by visible-arc selection.
+  for (let x = 60; x <= 100; x += 2) contour.push({ x, y: 48 });
+
+  const visible = selectVisiblePupilArcPoints(contour, {
+    irisCenter: center,
+    irisRadius: 42,
+    equivalentRadius: 29,
+  });
+  const fitted = fitPartialArcCircle(visible);
+
+  assert.ok(fitted);
+  assert.ok(Math.abs(fitted.x - center.x) < 1.5);
+  assert.ok(Math.abs(fitted.y - center.y) < 1.5);
+  assert.ok(Math.abs(fitted.radius - radius) < 1.5);
+  assert.ok(fitted.arcCoverage > 0.5);
+});
+
+test('occlusion-aware selection can prefer a larger partial-arc reconstruction', () => {
+  const result = chooseOcclusionAwarePupilFit([
+    {
+      type: 'equivalent-circle',
+      score: 0.92,
+      iou: 0.91,
+      centerDistanceRatio: 0.08,
+      width: 60,
+    },
+    {
+      type: 'partial-arc-circle',
+      score: 0.82,
+      iou: 0.75,
+      centerDistanceRatio: 0.10,
+      width: 66,
+      radiusExpansionRatio: 1.10,
+      arcCoverage: 0.68,
+      arcPointCount: 52,
+      arcResidualP90: 1.4,
+    },
+  ]);
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.best.type, 'partial-arc-circle');
+  assert.equal(result.reason, 'occlusion-recovery');
+});

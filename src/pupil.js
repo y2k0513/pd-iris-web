@@ -1,5 +1,10 @@
 import { fillSmallBlackHoles4Connected } from './binary.js';
-import { chooseBestPupilFit, scorePupilFitMetrics } from './fitting.js';
+import {
+  chooseOcclusionAwarePupilFit,
+  fitPartialArcCircle,
+  scorePupilFitMetrics,
+  selectVisiblePupilArcPoints,
+} from './fitting.js';
 
 const EYE_DEFINITIONS = Object.freeze({
   right: Object.freeze({
@@ -440,6 +445,7 @@ function drawDebugOverlay(cropCanvas, {
   detectedCenter,
   finalCenter,
   ellipse,
+  referenceEllipse,
   scaleX,
   scaleY,
   region,
@@ -474,6 +480,27 @@ function drawDebugOverlay(cropCanvas, {
   drawPoint(localMediaPipe, '#ffffff', Math.max(3, canvas.width / 85));
   drawPoint(localDetected, '#7f56d9', Math.max(3, canvas.width / 75));
   drawPoint(localFinal, '#2e90fa', Math.max(4, canvas.width / 65));
+
+  if (referenceEllipse) {
+    context.save();
+    context.translate(referenceEllipse.x, referenceEllipse.y);
+    context.rotate((referenceEllipse.angle || 0) * Math.PI / 180);
+    context.strokeStyle = 'rgba(255,255,255,.82)';
+    context.lineWidth = Math.max(1.5, canvas.width / 190);
+    context.setLineDash([Math.max(5, canvas.width / 45), Math.max(4, canvas.width / 60)]);
+    context.beginPath();
+    context.ellipse(
+      0,
+      0,
+      referenceEllipse.width / 2,
+      referenceEllipse.height / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+    context.stroke();
+    context.restore();
+  }
 
   if (ellipse) {
     context.save();
@@ -561,7 +588,23 @@ function selectPrimaryContour(cv, contours, localIrisCenter, irisArea, localIris
   return best;
 }
 
-function buildFitCandidates(cv, contour, geometry) {
+function contourToPoints(contour) {
+  const points = [];
+  const data = contour?.data32S;
+  if (!data) return points;
+  for (let index = 0; index + 1 < data.length; index += 2) {
+    points.push({ x: data[index], y: data[index + 1] });
+  }
+  return points;
+}
+
+function buildFitCandidates(
+  cv,
+  contour,
+  geometry,
+  localIrisCenter,
+  localIrisRadius,
+) {
   const candidates = [];
   const equivalentRadius = Math.sqrt(Math.max(1, geometry.area) / Math.PI);
   candidates.push({
@@ -572,6 +615,45 @@ function buildFitCandidates(cv, contour, geometry) {
     height: equivalentRadius * 2,
     angle: 0,
   });
+
+  const contourPoints = contourToPoints(contour);
+  const visibleArcPoints = selectVisiblePupilArcPoints(contourPoints, {
+    irisCenter: localIrisCenter,
+    irisRadius: localIrisRadius,
+    equivalentRadius,
+  });
+  const partialFit = fitPartialArcCircle(visibleArcPoints);
+  if (partialFit) {
+    const centerDistance = Math.hypot(
+      partialFit.x - localIrisCenter.x,
+      partialFit.y - localIrisCenter.y,
+    );
+    const minimumRadius = equivalentRadius * 0.92;
+    const maximumRadius = Math.min(
+      localIrisRadius * 1.04,
+      equivalentRadius * 1.36,
+    );
+    if (
+      partialFit.radius >= minimumRadius
+      && partialFit.radius <= maximumRadius
+      && centerDistance <= localIrisRadius * 0.62
+    ) {
+      candidates.push({
+        type: 'partial-arc-circle',
+        x: partialFit.x,
+        y: partialFit.y,
+        width: partialFit.radius * 2,
+        height: partialFit.radius * 2,
+        angle: 0,
+        arcPointCount: partialFit.pointCount,
+        arcOriginalPointCount: partialFit.originalPointCount,
+        arcCoverage: partialFit.arcCoverage,
+        arcResidualMean: partialFit.meanResidual,
+        arcResidualP90: partialFit.p90Residual,
+        radiusExpansionRatio: partialFit.radius / Math.max(1, equivalentRadius),
+      });
+    }
+  }
 
   if (typeof cv.minEnclosingCircle === 'function') {
     try {
@@ -691,15 +773,33 @@ function evaluateFitCandidate(
       localIrisRadius,
     );
     const contrast = clamp((intensity.ringMean - intensity.insideMean) / 70, 0, 1);
+    const arcResidualScore = candidate.type === 'partial-arc-circle'
+      ? clamp(1 - candidate.arcResidualP90 / Math.max(2.5, majorAxis * 0.075), 0, 1)
+      : 0;
+    const arcCoverageScore = candidate.type === 'partial-arc-circle'
+      ? clamp((candidate.arcCoverage - 0.35) / 0.45, 0, 1)
+      : 0;
+    const selectionScore = candidate.type === 'partial-arc-circle'
+      ? clamp(
+        fitScore * 0.72
+          + arcResidualScore * 0.18
+          + arcCoverageScore * 0.10,
+        0,
+        1,
+      )
+      : fitScore;
     const confidence = clamp(
-      Math.max(fitScore, fitScore * 0.90 + contrast * 0.10),
+      Math.max(selectionScore, selectionScore * 0.90 + contrast * 0.10),
       0,
       1,
     );
 
     return {
       ...candidate,
-      score: fitScore,
+      score: selectionScore,
+      baseFitScore: fitScore,
+      arcResidualScore,
+      arcCoverageScore,
       confidence,
       iou,
       coverage,
@@ -868,6 +968,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
     let selectedContour = null;
     let fitSelection = { best: null, accepted: false, reason: 'no-component' };
     let displayCandidate = null;
+    let evaluatedCandidates = [];
     let best = null;
 
     if (primary) {
@@ -880,8 +981,14 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         -1,
       );
       selectedContour = contours.get(primary.index);
-      const candidates = buildFitCandidates(cv, selectedContour, primary);
-      const evaluatedCandidates = candidates.map((candidate) => evaluateFitCandidate(
+      const candidates = buildFitCandidates(
+        cv,
+        selectedContour,
+        primary,
+        localIrisCenter,
+        localIrisRadius,
+      );
+      evaluatedCandidates = candidates.map((candidate) => evaluateFitCandidate(
         cv,
         candidate,
         componentMask,
@@ -891,7 +998,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         localIrisDiameter,
         primary,
       ));
-      fitSelection = chooseBestPupilFit(evaluatedCandidates);
+      fitSelection = chooseOcclusionAwarePupilFit(evaluatedCandidates);
       displayCandidate = fitSelection.best;
 
       if (fitSelection.accepted && fitSelection.best) {
@@ -934,6 +1041,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
     if (includeDebug) {
       const fitTypeLabels = {
         'equivalent-circle': '중심·면적 원',
+        'partial-arc-circle': '부분 원호 복원 원',
         'enclosing-circle': '외접원',
         ellipse: '타원',
       };
@@ -949,6 +1057,18 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         height: shownFit.height,
         angle: shownFit.angle || 0,
       } : null;
+      const equivalentCandidate = evaluatedCandidates.find(
+        (candidate) => candidate.type === 'equivalent-circle',
+      );
+      const referenceEllipse = shownFit?.type === 'partial-arc-circle' && equivalentCandidate
+        ? {
+          x: equivalentCandidate.x,
+          y: equivalentCandidate.y,
+          width: equivalentCandidate.width,
+          height: equivalentCandidate.height,
+          angle: 0,
+        }
+        : null;
       const fitLabel = shownFit ? fitTypeLabels[shownFit.type] || shownFit.type : '후보 없음';
       const sourceLabel = selected.source === 'opencv'
         ? `OpenCV ${fitLabel}`
@@ -962,6 +1082,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         detectedCenter: shownDetectedCenter,
         finalCenter: selected.center,
         ellipse: shownEllipse,
+        referenceEllipse,
         scaleX,
         scaleY,
         region,
@@ -1035,7 +1156,9 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
             key: 'result',
             label: '10. 원·타원 fitting 결과',
             description: displayCandidate
-              ? `${displayCandidate.type} 선택 · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 적합도 ${(displayCandidate.score * 100).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
+              ? displayCandidate.type === 'partial-arc-circle'
+                ? `부분 원호 복원 원 선택 · 반지름 ${(displayCandidate.radiusExpansionRatio * 100).toFixed(0)}%로 복원 · 가시 원호 ${(displayCandidate.arcCoverage * 100).toFixed(0)}% · P90 오차 ${displayCandidate.arcResidualP90.toFixed(1)}px · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 회색 점선=면적 원, 보라=복원 원, 파랑=최종 중심`
+                : `${displayCandidate.type} 선택 · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 적합도 ${(displayCandidate.score * 100).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
               : '유효한 fitting 후보가 없어 MediaPipe 홍채 중심을 사용',
             canvas: finalOverlay,
           },
