@@ -351,7 +351,126 @@ function gammaCorrect(cv, source, gamma = 0.85) {
   return output;
 }
 
-function detectPupilWithOpenCv(cv, source, landmarks, side, width, height) {
+function cloneCanvas(sourceCanvas) {
+  const canvas = document.createElement('canvas');
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  canvas.getContext('2d').drawImage(sourceCanvas, 0, 0);
+  return canvas;
+}
+
+function matToCanvas(cv, mat) {
+  const canvas = document.createElement('canvas');
+  canvas.width = mat.cols;
+  canvas.height = mat.rows;
+  cv.imshow(canvas, mat);
+  return canvas;
+}
+
+function drawDebugOverlay(cropCanvas, {
+  localIrisCenter,
+  localIrisRadius,
+  mediaPipeCenter,
+  detectedCenter,
+  finalCenter,
+  ellipse,
+  scaleX,
+  scaleY,
+  region,
+  confidence,
+  source,
+}) {
+  const canvas = cloneCanvas(cropCanvas);
+  const context = canvas.getContext('2d');
+  const toLocal = (point) => point ? ({
+    x: (point.x - region.x) * scaleX,
+    y: (point.y - region.y) * scaleY,
+  }) : null;
+  const localMediaPipe = toLocal(mediaPipeCenter);
+  const localDetected = toLocal(detectedCenter);
+  const localFinal = toLocal(finalCenter);
+
+  context.save();
+  context.lineWidth = Math.max(2, canvas.width / 180);
+  context.strokeStyle = '#f79009';
+  context.beginPath();
+  context.arc(localIrisCenter.x, localIrisCenter.y, localIrisRadius, 0, Math.PI * 2);
+  context.stroke();
+
+  const drawPoint = (point, color, radius) => {
+    if (!point) return;
+    context.fillStyle = color;
+    context.beginPath();
+    context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+    context.fill();
+  };
+
+  drawPoint(localMediaPipe, '#ffffff', Math.max(3, canvas.width / 85));
+  drawPoint(localDetected, '#7f56d9', Math.max(3, canvas.width / 75));
+  drawPoint(localFinal, '#2e90fa', Math.max(4, canvas.width / 65));
+
+  if (ellipse) {
+    context.save();
+    context.translate(ellipse.x, ellipse.y);
+    context.rotate((ellipse.angle || 0) * Math.PI / 180);
+    context.strokeStyle = '#7f56d9';
+    context.lineWidth = Math.max(2, canvas.width / 150);
+    context.beginPath();
+    context.ellipse(0, 0, ellipse.width / 2, ellipse.height / 2, 0, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
+
+  context.font = `700 ${Math.max(12, Math.round(canvas.width / 24))}px sans-serif`;
+  context.textBaseline = 'top';
+  const label = `${source} · 신뢰도 ${(confidence * 100).toFixed(0)}%`;
+  const textWidth = context.measureText(label).width;
+  context.fillStyle = 'rgba(2,8,18,.76)';
+  context.fillRect(6, 6, textWidth + 12, Math.max(22, canvas.width / 18));
+  context.fillStyle = '#ffffff';
+  context.fillText(label, 12, 9);
+  context.restore();
+  return canvas;
+}
+
+function buildFallbackDebug(source, landmarks, side, width, height, reason) {
+  const region = calculateEyeRegion(landmarks, side, width, height);
+  const targetWidth = clamp(Math.round(region.width * 4), 220, 480);
+  const crop = drawRegion(source, region, targetWidth);
+  const definition = EYE_DEFINITIONS[side];
+  const mediaPipeCenter = pointToPixel(landmarks[definition.irisCenter], width, height);
+  const localCenter = {
+    x: (mediaPipeCenter.x - region.x) * crop.scaleX,
+    y: (mediaPipeCenter.y - region.y) * crop.scaleY,
+  };
+  const overlay = cloneCanvas(crop.canvas);
+  const context = overlay.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.beginPath();
+  context.arc(localCenter.x, localCenter.y, Math.max(4, overlay.width / 65), 0, Math.PI * 2);
+  context.fill();
+  return {
+    darkThreshold: null,
+    targetWidth,
+    reason,
+    stages: [
+      {
+        key: 'crop',
+        label: '1. 원본 눈 crop',
+        description: 'MediaPipe 눈 랜드마크 기준으로 고해상도 원본에서 잘라낸 영역',
+        canvas: cloneCanvas(crop.canvas),
+      },
+      {
+        key: 'fallback',
+        label: '2. MediaPipe fallback',
+        description: `OpenCV 정밀 검출을 사용하지 못해 흰 점의 홍채 중심을 사용함 · ${reason}`,
+        canvas: overlay,
+      },
+    ],
+  };
+}
+
+function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { includeDebug = false } = {}) {
   const region = calculateEyeRegion(landmarks, side, width, height);
   const targetWidth = clamp(Math.round(region.width * 4), 220, 480);
   const crop = drawRegion(source, region, targetWidth);
@@ -513,6 +632,88 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height) {
     }
 
     const selected = selectRefinedPupilCenter(mediaPipeCenter, best?.detectedCenter, best?.confidence ?? 0);
+    let debug = null;
+    if (includeDebug) {
+      const sourceLabel = selected.source === 'opencv'
+        ? 'OpenCV'
+        : selected.source === 'blended' ? 'OpenCV+MediaPipe 융합' : 'MediaPipe fallback';
+      const finalOverlay = drawDebugOverlay(crop.canvas, {
+        localIrisCenter,
+        localIrisRadius,
+        mediaPipeCenter,
+        detectedCenter: best?.detectedCenter ?? null,
+        finalCenter: selected.center,
+        ellipse: best?.localEllipse ?? null,
+        scaleX,
+        scaleY,
+        region,
+        confidence: best?.confidence ?? 0,
+        source: sourceLabel,
+      });
+      debug = {
+        darkThreshold,
+        targetWidth,
+        localIrisDiameter,
+        contourCount: contours.size(),
+        stages: [
+          {
+            key: 'crop',
+            label: '1. 원본 눈 crop',
+            description: `원본에서 눈 주변을 잘라 ${crop.canvas.width}×${crop.canvas.height}px로 확대`,
+            canvas: cloneCanvas(crop.canvas),
+          },
+          {
+            key: 'gray',
+            label: '2. 회색조 변환',
+            description: 'RGB 색상 정보를 제거하고 밝기 정보만 유지',
+            canvas: matToCanvas(cv, gray),
+          },
+          {
+            key: 'gamma',
+            label: '3. Gamma 보정',
+            description: '어두운 갈색 홍채와 동공의 명암 차이를 강화',
+            canvas: matToCanvas(cv, gamma),
+          },
+          {
+            key: 'equalized',
+            label: '4. 히스토그램 보정',
+            description: '눈 crop 전체의 명암 분포를 넓혀 대비를 강화',
+            canvas: matToCanvas(cv, enhanced),
+          },
+          {
+            key: 'blurred',
+            label: '5. Gaussian blur',
+            description: '속눈썹·센서 잡음 같은 고주파 노이즈를 완화',
+            canvas: matToCanvas(cv, blurred),
+          },
+          {
+            key: 'mask',
+            label: '6. 홍채 탐색 마스크',
+            description: 'MediaPipe 홍채 중심 주변만 남겨 눈꺼풀과 속눈썹 후보를 제한',
+            canvas: matToCanvas(cv, mask),
+          },
+          {
+            key: 'threshold',
+            label: '7. 어두운 영역 이진화',
+            description: `홍채 내부 24백분위 기반 임계값 ${darkThreshold}로 어두운 픽셀을 흰색 후보로 변환`,
+            canvas: matToCanvas(cv, maskedBinary),
+          },
+          {
+            key: 'morphology',
+            label: '8. 형태학 보정',
+            description: '열기·닫기 연산으로 작은 잡음을 제거하고 끊어진 동공 후보를 연결',
+            canvas: matToCanvas(cv, closed),
+          },
+          {
+            key: 'result',
+            label: '9. 타원 fitting 결과',
+            description: '주황 원=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심',
+            canvas: finalOverlay,
+          },
+        ],
+      };
+    }
+
     return {
       side,
       region,
@@ -524,6 +725,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height) {
       confidence: best?.confidence ?? 0,
       ellipse: best?.ellipseGlobal ?? null,
       diagnostics: best,
+      debug,
     };
   } finally {
     for (const mat of [
@@ -551,11 +753,17 @@ export function fallbackPupilResult(landmarks, side, width, height, reason = 'op
   };
 }
 
-export function refinePupilCenters({ source, landmarks, width, height, cv = window.cv }) {
+export function refinePupilCenters({ source, landmarks, width, height, cv = window.cv, includeDebug = false }) {
   if (!cv?.Mat) {
     return {
-      right: fallbackPupilResult(landmarks, 'right', width, height),
-      left: fallbackPupilResult(landmarks, 'left', width, height),
+      right: {
+        ...fallbackPupilResult(landmarks, 'right', width, height),
+        debug: includeDebug ? buildFallbackDebug(source, landmarks, 'right', width, height, 'OpenCV 사용 불가') : null,
+      },
+      left: {
+        ...fallbackPupilResult(landmarks, 'left', width, height),
+        debug: includeDebug ? buildFallbackDebug(source, landmarks, 'left', width, height, 'OpenCV 사용 불가') : null,
+      },
       available: false,
       meanConfidence: 0,
       minConfidence: 0,
@@ -566,16 +774,22 @@ export function refinePupilCenters({ source, landmarks, width, height, cv = wind
   let right;
   let left;
   try {
-    right = detectPupilWithOpenCv(cv, source, landmarks, 'right', width, height);
+    right = detectPupilWithOpenCv(cv, source, landmarks, 'right', width, height, { includeDebug });
   } catch (error) {
     console.warn('Right pupil refinement failed.', error);
-    right = fallbackPupilResult(landmarks, 'right', width, height, error.message);
+    right = {
+      ...fallbackPupilResult(landmarks, 'right', width, height, error.message),
+      debug: includeDebug ? buildFallbackDebug(source, landmarks, 'right', width, height, error.message) : null,
+    };
   }
   try {
-    left = detectPupilWithOpenCv(cv, source, landmarks, 'left', width, height);
+    left = detectPupilWithOpenCv(cv, source, landmarks, 'left', width, height, { includeDebug });
   } catch (error) {
     console.warn('Left pupil refinement failed.', error);
-    left = fallbackPupilResult(landmarks, 'left', width, height, error.message);
+    left = {
+      ...fallbackPupilResult(landmarks, 'left', width, height, error.message),
+      debug: includeDebug ? buildFallbackDebug(source, landmarks, 'left', width, height, error.message) : null,
+    };
   }
 
   const confidences = [right.confidence, left.confidence];

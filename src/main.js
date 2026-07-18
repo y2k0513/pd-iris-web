@@ -79,6 +79,19 @@ const elements = {
   minEyeSharpnessInput: document.querySelector('#minEyeSharpnessInput'),
   minEyeBrightnessInput: document.querySelector('#minEyeBrightnessInput'),
   maxEyeBrightnessInput: document.querySelector('#maxEyeBrightnessInput'),
+  showProcessingInput: document.querySelector('#showProcessingInput'),
+  processingPlaceholder: document.querySelector('#processingPlaceholder'),
+  processingContent: document.querySelector('#processingContent'),
+  processingSummary: document.querySelector('#processingSummary'),
+  processingRight: document.querySelector('#processingRight'),
+  processingLeft: document.querySelector('#processingLeft'),
+  processingRightMeta: document.querySelector('#processingRightMeta'),
+  processingLeftMeta: document.querySelector('#processingLeftMeta'),
+  processingDialog: document.querySelector('#processingDialog'),
+  processingDialogTitle: document.querySelector('#processingDialogTitle'),
+  processingDialogCanvas: document.querySelector('#processingDialogCanvas'),
+  processingDialogDescription: document.querySelector('#processingDialogDescription'),
+  processingDialogClose: document.querySelector('#processingDialogClose'),
 };
 
 let faceLandmarker = null;
@@ -228,6 +241,7 @@ function getConfig() {
     minEyeBrightness: Number(elements.minEyeBrightnessInput.value) || 35,
     maxEyeBrightness: Number(elements.maxEyeBrightnessInput.value) || 225,
     minPupilConfidence: 0.50,
+    showProcessing: Boolean(elements.showProcessingInput?.checked),
   };
 }
 
@@ -768,6 +782,7 @@ async function analyzeFrame(canvas, cv, captureMethod = 'unknown') {
     width: canvas.width,
     height: canvas.height,
     cv,
+    includeDebug: config.showProcessing,
   });
   const measurement = measurePd({
     landmarks,
@@ -798,6 +813,7 @@ function aggregateBurst(analyses) {
     const bSharpness = b.measurement.eyeImageQuality?.minSharpness || 0;
     return bSharpness - aSharpness;
   })[0];
+  const selectedFrameIndex = analyses.indexOf(selected);
 
   const singleFramePdMm = selected.measurement.pdMm;
   const meanQualityScore = Math.round(
@@ -820,6 +836,7 @@ function aggregateBurst(analyses) {
       medianPdMm,
       singleFramePdMm,
       spreadMm: Math.max(...values) - Math.min(...values),
+      selectedFrameIndex,
     },
   };
   const quality = {
@@ -869,6 +886,7 @@ async function analyzeBurst(captures, { strictCapture }) {
     copyCanvas(final.canvas, elements.captureCanvas);
     lastAnalysisSource = elements.captureCanvas;
     renderResult(final.canvas, final.landmarks, final.measurement, final.quality);
+    renderProcessingDebug(final.measurement);
     updateMetrics(final.canvas, final.measurement, final.quality, sexPrior);
     setStatus(elements.qualityBadge, '측정 가능', 'success');
     const priorSummary = sexPrior.withinTypicalRange
@@ -933,6 +951,7 @@ async function analyzeCanvas(canvas, { strictCapture, captureMethod = 'single im
     copyCanvas(canvas, elements.captureCanvas);
     lastAnalysisSource = elements.captureCanvas;
     renderResult(canvas, landmarks, measurement, quality);
+    renderProcessingDebug(measurement);
     updateMetrics(canvas, measurement, quality, sexPrior);
     setStatus(elements.qualityBadge, quality.accepted ? '측정 가능' : '재촬영 권장', quality.accepted ? 'success' : 'danger');
     const priorSummary = sexPrior.withinTypicalRange
@@ -951,6 +970,91 @@ async function analyzeCanvas(canvas, { strictCapture, captureMethod = 'single im
     await setModelMode('VIDEO');
     livePaused = wasLivePaused;
   }
+}
+
+function resetProcessingDebug(message = '촬영하거나 사진을 분석하면 좌우 눈 crop부터 동공 타원 fitting까지 각 단계를 표시합니다.') {
+  if (!elements.processingPlaceholder) return;
+  elements.processingPlaceholder.textContent = message;
+  elements.processingPlaceholder.hidden = false;
+  elements.processingContent.hidden = true;
+  elements.processingRight.replaceChildren();
+  elements.processingLeft.replaceChildren();
+  elements.processingRightMeta.textContent = '--';
+  elements.processingLeftMeta.textContent = '--';
+}
+
+function copyStageToDialog(stage) {
+  if (!elements.processingDialog || !stage?.canvas) return;
+  elements.processingDialogTitle.textContent = stage.label;
+  elements.processingDialogDescription.textContent = stage.description || '';
+  const target = elements.processingDialogCanvas;
+  target.width = stage.canvas.width;
+  target.height = stage.canvas.height;
+  target.getContext('2d').drawImage(stage.canvas, 0, 0);
+  if (typeof elements.processingDialog.showModal === 'function') {
+    elements.processingDialog.showModal();
+  } else {
+    elements.processingDialog.setAttribute('open', '');
+  }
+}
+
+function renderEyeProcessing(container, metaElement, pupil) {
+  container.replaceChildren();
+  if (!pupil?.debug?.stages?.length) {
+    const unavailable = document.createElement('div');
+    unavailable.className = 'processing-placeholder';
+    unavailable.textContent = pupil?.reason || '이 눈의 처리과정 이미지가 없습니다.';
+    container.append(unavailable);
+    metaElement.textContent = `${pupil?.source || 'unknown'} · 신뢰도 ${((pupil?.confidence || 0) * 100).toFixed(0)}%`;
+    return;
+  }
+
+  const diagnostics = pupil.diagnostics;
+  const threshold = pupil.debug.darkThreshold;
+  metaElement.textContent = [
+    `${pupil.source} · 신뢰도 ${(pupil.confidence * 100).toFixed(0)}%`,
+    Number.isFinite(threshold) ? `임계값 ${threshold}` : null,
+    diagnostics ? `대비 ${(diagnostics.contrast * 100).toFixed(0)}% · 원형도 ${(diagnostics.circularity * 100).toFixed(0)}%` : null,
+  ].filter(Boolean).join(' · ');
+
+  for (const stage of pupil.debug.stages) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'processing-stage';
+    button.setAttribute('aria-label', `${stage.label} 확대`);
+    const title = document.createElement('strong');
+    title.textContent = stage.label;
+    const description = document.createElement('small');
+    description.textContent = stage.description || '';
+    button.append(stage.canvas, title, description);
+    button.addEventListener('click', () => copyStageToDialog(stage));
+    container.append(button);
+  }
+}
+
+function renderProcessingDebug(measurement) {
+  if (!elements.processingPlaceholder) return;
+  const config = getConfig();
+  if (!config.showProcessing) {
+    resetProcessingDebug('측정 설정의 “처리과정 표시”를 켜고 다시 분석하면 각 단계를 볼 수 있습니다.');
+    return;
+  }
+
+  const pupilRefinement = measurement?.pupilRefinement;
+  if (!pupilRefinement) {
+    resetProcessingDebug('동공 보정 결과가 없어 처리과정을 표시할 수 없습니다.');
+    return;
+  }
+
+  elements.processingPlaceholder.hidden = true;
+  elements.processingContent.hidden = false;
+  const burst = measurement.burst;
+  const selectedFrameText = burst
+    ? `버스트 ${burst.frameCount}장 중 ${burst.selectedFrameIndex + 1}번째 프레임이 중앙값에 가장 가까워 시각화에 선택됨`
+    : '단일 프레임 처리과정';
+  elements.processingSummary.textContent = `${selectedFrameText} · 실제 PD에는 파란 최종 중심이 사용됩니다. OpenCV 신뢰도가 낮으면 흰색 MediaPipe 중심으로 fallback합니다.`;
+  renderEyeProcessing(elements.processingRight, elements.processingRightMeta, pupilRefinement.right);
+  renderEyeProcessing(elements.processingLeft, elements.processingLeftMeta, pupilRefinement.left);
 }
 
 function renderResult(sourceCanvas, landmarks, measurement, quality) {
@@ -1084,6 +1188,7 @@ function resetMetrics() {
   elements.framingValue.textContent = '--';
   elements.resolutionValue.textContent = '--';
   elements.qualityScoreValue.textContent = '--';
+  resetProcessingDebug();
 }
 
 async function reanalyzeLastImage() {
@@ -1100,6 +1205,7 @@ for (const input of [
   elements.minEyeSharpnessInput,
   elements.minEyeBrightnessInput,
   elements.maxEyeBrightnessInput,
+  elements.showProcessingInput,
 ]) {
   input.addEventListener('change', reanalyzeLastImage);
 }
@@ -1110,6 +1216,11 @@ elements.sexInput.addEventListener('change', () => {
   validHoldStartedAt = null;
   syncCaptureButton();
   void reanalyzeLastImage();
+});
+
+elements.processingDialogClose?.addEventListener('click', () => elements.processingDialog.close());
+elements.processingDialog?.addEventListener('click', (event) => {
+  if (event.target === elements.processingDialog) elements.processingDialog.close();
 });
 
 elements.startCameraButton.addEventListener('click', startCamera);

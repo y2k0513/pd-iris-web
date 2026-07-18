@@ -125,9 +125,42 @@
         </article>
       </section>
 
+      <section class="panel processing-panel" id="processingPanel">
+        <div class="panel-heading compact">
+          <div><span class="step">3</span><h2>사진 처리과정</h2></div>
+          <span class="muted">최종 선택 프레임 기준 · 이미지를 누르면 확대</span>
+        </div>
+        <div id="processingPlaceholder" class="processing-placeholder">
+          촬영하거나 사진을 분석하면 좌우 눈 crop부터 동공 타원 fitting까지 각 단계를 표시합니다.
+        </div>
+        <div id="processingContent" hidden>
+          <div id="processingSummary" class="processing-summary"></div>
+          <div class="processing-eye-block">
+            <div class="processing-eye-heading">
+              <h3>오른쪽 눈</h3>
+              <span id="processingRightMeta">--</span>
+            </div>
+            <div id="processingRight" class="processing-grid"></div>
+          </div>
+          <div class="processing-eye-block">
+            <div class="processing-eye-heading">
+              <h3>왼쪽 눈</h3>
+              <span id="processingLeftMeta">--</span>
+            </div>
+            <div id="processingLeft" class="processing-grid"></div>
+          </div>
+          <div class="processing-legend">
+            최종 화면 표기: <b class="legend-orange">주황 원</b> 홍채 탐색영역 ·
+            <b class="legend-white">흰 점</b> MediaPipe 중심 ·
+            <b class="legend-purple">보라</b> OpenCV 후보 ·
+            <b class="legend-blue">파랑</b> 최종 사용 중심
+          </div>
+        </div>
+      </section>
+
       <section class="panel settings-panel">
         <div class="panel-heading compact">
-          <div><span class="step">3</span><h2>측정 설정</h2></div>
+          <div><span class="step">4</span><h2>측정 설정</h2></div>
         </div>
         <div class="settings-grid">
           <label>기준 홍채 지름<span><input id="irisReferenceInput" type="number" min="9" max="14" step="0.1" value="11.7" /> mm</span></label>
@@ -139,8 +172,18 @@
           <label>최소 눈 선명도<span><input id="minEyeSharpnessInput" type="number" min="5" max="300" step="5" value="35" /></span></label>
           <label>최소 눈 밝기<span><input id="minEyeBrightnessInput" type="number" min="5" max="150" step="5" value="35" /></span></label>
           <label>최대 눈 밝기<span><input id="maxEyeBrightnessInput" type="number" min="120" max="250" step="5" value="225" /></span></label>
+          <label class="checkbox-setting">처리과정 표시<span><input id="showProcessingInput" type="checkbox" checked /></span></label>
         </div>
       </section>
+
+      <dialog id="processingDialog" class="processing-dialog">
+        <div class="processing-dialog-header">
+          <strong id="processingDialogTitle">처리 이미지</strong>
+          <button id="processingDialogClose" type="button" aria-label="닫기">×</button>
+        </div>
+        <canvas id="processingDialogCanvas"></canvas>
+        <p id="processingDialogDescription"></p>
+      </dialog>
 
       <footer><p>최종 PD는 2D 홍채 비율과 3프레임 중앙값을 사용합니다. OpenCV 동공 보정은 신뢰도에 따라 적용되며, 실패 시 MediaPipe 중심으로 대체합니다. 상대 3D는 품질 검사용입니다.</p></footer>
     </main>
