@@ -1,4 +1,7 @@
-import { fillSmallBlackHoles4Connected } from './binary.js';
+import {
+  fillSmallBlackHoles4Connected,
+} from './binary.js';
+
 import {
   chooseOcclusionAwarePupilFit,
   fitPartialArcCircle,
@@ -13,156 +16,302 @@ const EYE_DEFINITIONS = Object.freeze({
     upper: 159,
     lower: 145,
     irisCenter: 468,
-    irisBoundary: [469, 470, 471, 472],
+    irisBoundary: [
+      469,
+      470,
+      471,
+      472,
+    ],
   }),
+
   left: Object.freeze({
     outer: 263,
     inner: 362,
     upper: 386,
     lower: 374,
     irisCenter: 473,
-    irisBoundary: [474, 475, 476, 477],
+    irisBoundary: [
+      474,
+      475,
+      476,
+      477,
+    ],
   }),
 });
+
+// 최종 표시 원만 3.5% 확대한다.
+// fitting 점수와 PD 중심 계산에는 적용하지 않는다.
+const PUPIL_FINAL_CIRCLE_SCALE = 1.035;
 
 const DEFAULT_OPENCV_URLS = [
   'opencv/opencv.js',
   'https://docs.opencv.org/4.x/opencv.js',
 ];
 
-// Pupil segmentation tuning values.
-// Tone correction uses a dark-side pivot. Pixels farther from the pivot are
-// pushed progressively toward black or white with a sigmoid curve.
 const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 18;
-// A higher binary percentile/offset includes moderately dark pupil pixels,
-// rather than keeping only the very darkest pixels.
+
 const PUPIL_THRESHOLD_PERCENTILE = 0.45;
 const PUPIL_THRESHOLD_OFFSET = 10;
 const PUPIL_THRESHOLD_MIN = 12;
 const PUPIL_THRESHOLD_MAX = 180;
+
 const PUPIL_OPEN_KERNEL_SIZE = 3;
 const PUPIL_CLOSE_KERNEL_SIZE = 7;
+
 const PUPIL_HOLE_MAX_AREA_RATIO = 0.08;
 const PUPIL_HOLE_MAX_AREA_MIN = 12;
 const PUPIL_HOLE_MAX_AREA_MAX = 800;
+
 const PUPIL_FIT_MIN_CONFIDENCE = 0.38;
 const PUPIL_FIT_FULL_CONFIDENCE = 0.72;
-const PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO = 0.008;
-// Fill larger enclosed dark regions after closing. Border-connected black
-// pixels are still preserved as exterior background by the 4-neighbour
-// connected-component labelling step.
+
+const PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO =
+  0.008;
 
 let openCvReadyPromise = null;
-const scratchCanvas = document.createElement('canvas');
-const scratchContext = scratchCanvas.getContext('2d', { willReadFrequently: true });
+
+const scratchCanvas =
+  document.createElement('canvas');
+
+const scratchContext =
+  scratchCanvas.getContext(
+    '2d',
+    {
+      willReadFrequently: true,
+    },
+  );
 
 function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
+  return Math.min(
+    max,
+    Math.max(min, value),
+  );
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(
+    (resolve) => setTimeout(resolve, ms),
+  );
 }
 
-function pointToPixel(point, width, height) {
-  return { x: point.x * width, y: point.y * height };
+function pointToPixel(
+  point,
+  width,
+  height,
+) {
+  return {
+    x: point.x * width,
+    y: point.y * height,
+  };
 }
 
 function pointDistance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+  return Math.hypot(
+    a.x - b.x,
+    a.y - b.y,
+  );
 }
 
 function maxPairwiseDistance(points) {
   let maximum = 0;
-  for (let i = 0; i < points.length; i += 1) {
-    for (let j = i + 1; j < points.length; j += 1) {
-      maximum = Math.max(maximum, pointDistance(points[i], points[j]));
+
+  for (
+    let first = 0;
+    first < points.length;
+    first += 1
+  ) {
+    for (
+      let second = first + 1;
+      second < points.length;
+      second += 1
+    ) {
+      maximum = Math.max(
+        maximum,
+        pointDistance(
+          points[first],
+          points[second],
+        ),
+      );
     }
   }
+
   return maximum;
 }
 
 function normalizeOpenCvCandidate(candidate) {
-  if (candidate?.Mat) return Promise.resolve(candidate);
-  if (candidate && typeof candidate.then === 'function') {
+  if (candidate?.Mat) {
+    return Promise.resolve(candidate);
+  }
+
+  if (
+    candidate
+    && typeof candidate.then === 'function'
+  ) {
     return candidate.then((resolved) => {
-      if (!resolved?.Mat) throw new Error('OpenCV.js 런타임 객체가 올바르지 않습니다.');
+      if (!resolved?.Mat) {
+        throw new Error(
+          'OpenCV.js 런타임 객체가 올바르지 않습니다.',
+        );
+      }
+
       window.cv = resolved;
       return resolved;
     });
   }
+
   return null;
 }
 
-async function waitForOpenCv(timeoutMs = 25_000) {
+async function waitForOpenCv(
+  timeoutMs = 25_000,
+) {
   const start = performance.now();
-  while (performance.now() - start < timeoutMs) {
-    const candidate = normalizeOpenCvCandidate(window.cv);
+
+  while (
+    performance.now() - start < timeoutMs
+  ) {
+    const candidate =
+      normalizeOpenCvCandidate(window.cv);
+
     if (candidate) {
       try {
         return await candidate;
       } catch {
-        // Runtime may still be starting. Continue polling.
+        // OpenCV 런타임 초기화가 끝날 때까지 반복한다.
       }
     }
+
     await delay(60);
   }
-  throw new Error('OpenCV.js 초기화 시간이 초과되었습니다.');
+
+  throw new Error(
+    'OpenCV.js 초기화 시간이 초과되었습니다.',
+  );
 }
 
 function loadScript(url) {
-  return new Promise((resolve, reject) => {
-    const existing = [...document.scripts].find((script) => script.dataset.opencvSource === url);
-    if (existing) {
-      if (existing.dataset.loaded === 'true') resolve();
-      else {
-        existing.addEventListener('load', resolve, { once: true });
-        existing.addEventListener('error', reject, { once: true });
-      }
-      return;
-    }
+  return new Promise(
+    (resolve, reject) => {
+      const existing = [
+        ...document.scripts,
+      ].find(
+        (script) =>
+          script.dataset.opencvSource === url,
+      );
 
-    const script = document.createElement('script');
-    script.src = url;
-    script.async = true;
-    script.dataset.opencvSource = url;
-    script.addEventListener('load', () => {
-      script.dataset.loaded = 'true';
-      resolve();
-    }, { once: true });
-    script.addEventListener('error', () => reject(new Error(`OpenCV.js 로드 실패: ${url}`)), { once: true });
-    document.head.append(script);
-  });
+      if (existing) {
+        if (
+          existing.dataset.loaded === 'true'
+        ) {
+          resolve();
+        } else {
+          existing.addEventListener(
+            'load',
+            resolve,
+            { once: true },
+          );
+
+          existing.addEventListener(
+            'error',
+            reject,
+            { once: true },
+          );
+        }
+
+        return;
+      }
+
+      const script =
+        document.createElement('script');
+
+      script.src = url;
+      script.async = true;
+      script.dataset.opencvSource = url;
+
+      script.addEventListener(
+        'load',
+        () => {
+          script.dataset.loaded = 'true';
+          resolve();
+        },
+        { once: true },
+      );
+
+      script.addEventListener(
+        'error',
+        () => reject(
+          new Error(
+            `OpenCV.js 로드 실패: ${url}`,
+          ),
+        ),
+        { once: true },
+      );
+
+      document.head.append(script);
+    },
+  );
 }
 
-export function ensureOpenCvReady(urls = DEFAULT_OPENCV_URLS) {
-  if (window.cv?.Mat) return Promise.resolve(window.cv);
-  if (openCvReadyPromise) return openCvReadyPromise;
+export function ensureOpenCvReady(
+  urls = DEFAULT_OPENCV_URLS,
+) {
+  if (window.cv?.Mat) {
+    return Promise.resolve(window.cv);
+  }
+
+  if (openCvReadyPromise) {
+    return openCvReadyPromise;
+  }
 
   openCvReadyPromise = (async () => {
     let lastError = null;
+
     for (const url of urls) {
       try {
         await loadScript(url);
-        return await waitForOpenCv(url.includes('opencv/opencv.js') && !url.startsWith('http') ? 5_000 : 25_000);
+
+        const isLocal =
+          url.includes('opencv/opencv.js')
+          && !url.startsWith('http');
+
+        return await waitForOpenCv(
+          isLocal
+            ? 5_000
+            : 25_000,
+        );
       } catch (error) {
         lastError = error;
         console.warn(error);
       }
     }
-    throw lastError || new Error('OpenCV.js를 불러오지 못했습니다.');
+
+    throw lastError || new Error(
+      'OpenCV.js를 불러오지 못했습니다.',
+    );
   })();
 
   return openCvReadyPromise;
 }
 
-export function calculateEyeRegion(landmarks, side, width, height, {
-  paddingXRatio = 0.35,
-  paddingYRatio = 0.30,
-} = {}) {
-  const definition = EYE_DEFINITIONS[side];
-  if (!definition) throw new Error(`알 수 없는 눈 방향: ${side}`);
+export function calculateEyeRegion(
+  landmarks,
+  side,
+  width,
+  height,
+  {
+    paddingXRatio = 0.35,
+    paddingYRatio = 0.30,
+  } = {},
+) {
+  const definition =
+    EYE_DEFINITIONS[side];
+
+  if (!definition) {
+    throw new Error(
+      `알 수 없는 눈 방향: ${side}`,
+    );
+  }
 
   const indices = [
     definition.outer,
@@ -172,22 +321,110 @@ export function calculateEyeRegion(landmarks, side, width, height, {
     definition.irisCenter,
     ...definition.irisBoundary,
   ];
-  const points = indices.map((index) => pointToPixel(landmarks[index], width, height));
-  const outer = pointToPixel(landmarks[definition.outer], width, height);
-  const inner = pointToPixel(landmarks[definition.inner], width, height);
-  const eyeWidth = Math.max(1, pointDistance(outer, inner));
-  const padX = eyeWidth * paddingXRatio;
-  const padY = eyeWidth * paddingYRatio;
-  const minX = Math.min(...points.map((point) => point.x)) - padX;
-  const maxX = Math.max(...points.map((point) => point.x)) + padX;
-  const minY = Math.min(...points.map((point) => point.y)) - padY;
-  const maxY = Math.max(...points.map((point) => point.y)) + padY;
-  const x = Math.floor(clamp(minX, 0, width - 2));
-  const y = Math.floor(clamp(minY, 0, height - 2));
-  const regionWidth = Math.max(2, Math.ceil(clamp(maxX, x + 2, width) - x));
-  const regionHeight = Math.max(2, Math.ceil(clamp(maxY, y + 2, height) - y));
-  const irisCenter = pointToPixel(landmarks[definition.irisCenter], width, height);
-  const irisBoundary = definition.irisBoundary.map((index) => pointToPixel(landmarks[index], width, height));
+
+  const points = indices.map(
+    (index) => pointToPixel(
+      landmarks[index],
+      width,
+      height,
+    ),
+  );
+
+  const outer = pointToPixel(
+    landmarks[definition.outer],
+    width,
+    height,
+  );
+
+  const inner = pointToPixel(
+    landmarks[definition.inner],
+    width,
+    height,
+  );
+
+  const eyeWidth = Math.max(
+    1,
+    pointDistance(outer, inner),
+  );
+
+  const padX =
+    eyeWidth * paddingXRatio;
+
+  const padY =
+    eyeWidth * paddingYRatio;
+
+  const minX =
+    Math.min(
+      ...points.map((point) => point.x),
+    ) - padX;
+
+  const maxX =
+    Math.max(
+      ...points.map((point) => point.x),
+    ) + padX;
+
+  const minY =
+    Math.min(
+      ...points.map((point) => point.y),
+    ) - padY;
+
+  const maxY =
+    Math.max(
+      ...points.map((point) => point.y),
+    ) + padY;
+
+  const x = Math.floor(
+    clamp(
+      minX,
+      0,
+      width - 2,
+    ),
+  );
+
+  const y = Math.floor(
+    clamp(
+      minY,
+      0,
+      height - 2,
+    ),
+  );
+
+  const regionWidth = Math.max(
+    2,
+    Math.ceil(
+      clamp(
+        maxX,
+        x + 2,
+        width,
+      ) - x,
+    ),
+  );
+
+  const regionHeight = Math.max(
+    2,
+    Math.ceil(
+      clamp(
+        maxY,
+        y + 2,
+        height,
+      ) - y,
+    ),
+  );
+
+  const irisCenter = pointToPixel(
+    landmarks[definition.irisCenter],
+    width,
+    height,
+  );
+
+  const irisBoundary =
+    definition.irisBoundary.map(
+      (index) => pointToPixel(
+        landmarks[index],
+        width,
+        height,
+      ),
+    );
 
   return {
     side,
@@ -198,16 +435,42 @@ export function calculateEyeRegion(landmarks, side, width, height, {
     eyeWidth,
     irisCenter,
     irisBoundary,
-    irisDiameter: maxPairwiseDistance(irisBoundary),
+    irisDiameter:
+      maxPairwiseDistance(
+        irisBoundary,
+      ),
   };
 }
 
-function drawRegion(source, region, targetWidth) {
-  const width = Math.max(80, Math.round(targetWidth));
-  const height = Math.max(40, Math.round(region.height * width / region.width));
+function drawRegion(
+  source,
+  region,
+  targetWidth,
+) {
+  const width = Math.max(
+    80,
+    Math.round(targetWidth),
+  );
+
+  const height = Math.max(
+    40,
+    Math.round(
+      region.height
+      * width
+      / region.width,
+    ),
+  );
+
   scratchCanvas.width = width;
   scratchCanvas.height = height;
-  scratchContext.clearRect(0, 0, width, height);
+
+  scratchContext.clearRect(
+    0,
+    0,
+    width,
+    height,
+  );
+
   scratchContext.drawImage(
     source,
     region.x,
@@ -219,6 +482,7 @@ function drawRegion(source, region, targetWidth) {
     width,
     height,
   );
+
   return {
     canvas: scratchCanvas,
     context: scratchContext,
@@ -227,115 +491,351 @@ function drawRegion(source, region, targetWidth) {
   };
 }
 
-function grayscaleFromImageData(imageData) {
-  const { data, width, height } = imageData;
-  const gray = new Uint8Array(width * height);
+function grayscaleFromImageData(
+  imageData,
+) {
+  const {
+    data,
+    width,
+    height,
+  } = imageData;
+
+  const gray =
+    new Uint8Array(width * height);
+
   let sum = 0;
   let underexposed = 0;
   let overexposed = 0;
-  for (let sourceIndex = 0, grayIndex = 0; sourceIndex < data.length; sourceIndex += 4, grayIndex += 1) {
-    const value = Math.round(0.299 * data[sourceIndex] + 0.587 * data[sourceIndex + 1] + 0.114 * data[sourceIndex + 2]);
+
+  for (
+    let sourceIndex = 0,
+      grayIndex = 0;
+    sourceIndex < data.length;
+    sourceIndex += 4,
+      grayIndex += 1
+  ) {
+    const value = Math.round(
+      0.299 * data[sourceIndex]
+      + 0.587 * data[sourceIndex + 1]
+      + 0.114 * data[sourceIndex + 2],
+    );
+
     gray[grayIndex] = value;
     sum += value;
-    if (value < 20) underexposed += 1;
-    if (value > 245) overexposed += 1;
+
+    if (value < 20) {
+      underexposed += 1;
+    }
+
+    if (value > 245) {
+      overexposed += 1;
+    }
   }
+
   const count = gray.length;
+
   return {
     gray,
     width,
     height,
-    brightness: sum / count,
-    underexposedRatio: underexposed / count,
-    overexposedRatio: overexposed / count,
+    brightness:
+      count ? sum / count : 0,
+    underexposedRatio:
+      count ? underexposed / count : 0,
+    overexposedRatio:
+      count ? overexposed / count : 0,
   };
 }
 
-export function calculateLaplacianVariance(gray, width, height) {
-  if (!gray || width < 3 || height < 3) return 0;
+export function calculateLaplacianVariance(
+  gray,
+  width,
+  height,
+) {
+  if (
+    !gray
+    || width < 3
+    || height < 3
+  ) {
+    return 0;
+  }
+
   let sum = 0;
   let sumSquares = 0;
   let count = 0;
-  for (let y = 1; y < height - 1; y += 1) {
+
+  for (
+    let y = 1;
+    y < height - 1;
+    y += 1
+  ) {
     const row = y * width;
-    for (let x = 1; x < width - 1; x += 1) {
+
+    for (
+      let x = 1;
+      x < width - 1;
+      x += 1
+    ) {
       const index = row + x;
-      const laplacian = gray[index - width] + gray[index + width]
-        + gray[index - 1] + gray[index + 1] - 4 * gray[index];
+
+      const laplacian =
+        gray[index - width]
+        + gray[index + width]
+        + gray[index - 1]
+        + gray[index + 1]
+        - 4 * gray[index];
+
       sum += laplacian;
-      sumSquares += laplacian * laplacian;
+      sumSquares +=
+        laplacian * laplacian;
+
       count += 1;
     }
   }
+
   if (!count) return 0;
+
   const mean = sum / count;
-  return Math.max(0, sumSquares / count - mean * mean);
+
+  return Math.max(
+    0,
+    sumSquares / count
+      - mean * mean,
+  );
 }
 
-function measureSingleEyeImageQuality(source, landmarks, side, width, height) {
-  const region = calculateEyeRegion(landmarks, side, width, height);
-  const crop = drawRegion(source, region, 180);
-  const imageData = crop.context.getImageData(0, 0, crop.canvas.width, crop.canvas.height);
-  const grayData = grayscaleFromImageData(imageData);
+function measureSingleEyeImageQuality(
+  source,
+  landmarks,
+  side,
+  width,
+  height,
+) {
+  const region = calculateEyeRegion(
+    landmarks,
+    side,
+    width,
+    height,
+  );
+
+  const crop = drawRegion(
+    source,
+    region,
+    180,
+  );
+
+  const imageData =
+    crop.context.getImageData(
+      0,
+      0,
+      crop.canvas.width,
+      crop.canvas.height,
+    );
+
+  const grayData =
+    grayscaleFromImageData(imageData);
+
   return {
     side,
     region,
-    sharpness: calculateLaplacianVariance(grayData.gray, grayData.width, grayData.height),
-    brightness: grayData.brightness,
-    underexposedRatio: grayData.underexposedRatio,
-    overexposedRatio: grayData.overexposedRatio,
+    sharpness:
+      calculateLaplacianVariance(
+        grayData.gray,
+        grayData.width,
+        grayData.height,
+      ),
+    brightness:
+      grayData.brightness,
+    underexposedRatio:
+      grayData.underexposedRatio,
+    overexposedRatio:
+      grayData.overexposedRatio,
   };
 }
 
-export function measureEyeImageQuality(source, landmarks, width, height) {
-  const right = measureSingleEyeImageQuality(source, landmarks, 'right', width, height);
-  const left = measureSingleEyeImageQuality(source, landmarks, 'left', width, height);
+export function measureEyeImageQuality(
+  source,
+  landmarks,
+  width,
+  height,
+) {
+  const right =
+    measureSingleEyeImageQuality(
+      source,
+      landmarks,
+      'right',
+      width,
+      height,
+    );
+
+  const left =
+    measureSingleEyeImageQuality(
+      source,
+      landmarks,
+      'left',
+      width,
+      height,
+    );
+
   return {
     right,
     left,
-    minSharpness: Math.min(right.sharpness, left.sharpness),
-    meanSharpness: (right.sharpness + left.sharpness) / 2,
-    minBrightness: Math.min(right.brightness, left.brightness),
-    maxBrightness: Math.max(right.brightness, left.brightness),
-    meanBrightness: (right.brightness + left.brightness) / 2,
-    maxUnderexposedRatio: Math.max(right.underexposedRatio, left.underexposedRatio),
-    maxOverexposedRatio: Math.max(right.overexposedRatio, left.overexposedRatio),
+
+    minSharpness: Math.min(
+      right.sharpness,
+      left.sharpness,
+    ),
+
+    meanSharpness: (
+      right.sharpness
+      + left.sharpness
+    ) / 2,
+
+    minBrightness: Math.min(
+      right.brightness,
+      left.brightness,
+    ),
+
+    maxBrightness: Math.max(
+      right.brightness,
+      left.brightness,
+    ),
+
+    meanBrightness: (
+      right.brightness
+      + left.brightness
+    ) / 2,
+
+    maxUnderexposedRatio: Math.max(
+      right.underexposedRatio,
+      left.underexposedRatio,
+    ),
+
+    maxOverexposedRatio: Math.max(
+      right.overexposedRatio,
+      left.overexposedRatio,
+    ),
   };
 }
 
-function percentile(values, fraction) {
+function percentile(
+  values,
+  fraction,
+) {
   if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.round(clamp(fraction, 0, 1) * (sorted.length - 1));
+
+  const sorted = [...values].sort(
+    (a, b) => a - b,
+  );
+
+  const index = Math.round(
+    clamp(fraction, 0, 1)
+    * (sorted.length - 1),
+  );
+
   return sorted[index];
 }
 
-function meanEllipseAndRing(gray, width, height, ellipse, irisCenter, irisRadius) {
-  const angle = -(ellipse.angle || 0) * Math.PI / 180;
+function meanEllipseAndRing(
+  gray,
+  width,
+  height,
+  ellipse,
+  irisCenter,
+  irisRadius,
+) {
+  const angle =
+    -(ellipse.angle || 0)
+    * Math.PI
+    / 180;
+
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
-  const rx = Math.max(1, ellipse.width / 2);
-  const ry = Math.max(1, ellipse.height / 2);
+
+  const rx = Math.max(
+    1,
+    ellipse.width / 2,
+  );
+
+  const ry = Math.max(
+    1,
+    ellipse.height / 2,
+  );
+
   let insideSum = 0;
   let insideCount = 0;
   let ringSum = 0;
   let ringCount = 0;
 
-  const xStart = Math.max(0, Math.floor(irisCenter.x - irisRadius));
-  const xEnd = Math.min(width - 1, Math.ceil(irisCenter.x + irisRadius));
-  const yStart = Math.max(0, Math.floor(irisCenter.y - irisRadius));
-  const yEnd = Math.min(height - 1, Math.ceil(irisCenter.y + irisRadius));
+  const xStart = Math.max(
+    0,
+    Math.floor(
+      irisCenter.x - irisRadius,
+    ),
+  );
 
-  for (let y = yStart; y <= yEnd; y += 1) {
-    for (let x = xStart; x <= xEnd; x += 1) {
-      const irisDistance = Math.hypot(x - irisCenter.x, y - irisCenter.y);
-      if (irisDistance > irisRadius) continue;
+  const xEnd = Math.min(
+    width - 1,
+    Math.ceil(
+      irisCenter.x + irisRadius,
+    ),
+  );
+
+  const yStart = Math.max(
+    0,
+    Math.floor(
+      irisCenter.y - irisRadius,
+    ),
+  );
+
+  const yEnd = Math.min(
+    height - 1,
+    Math.ceil(
+      irisCenter.y + irisRadius,
+    ),
+  );
+
+  for (
+    let y = yStart;
+    y <= yEnd;
+    y += 1
+  ) {
+    for (
+      let x = xStart;
+      x <= xEnd;
+      x += 1
+    ) {
+      const irisDistance = Math.hypot(
+        x - irisCenter.x,
+        y - irisCenter.y,
+      );
+
+      if (
+        irisDistance > irisRadius
+      ) {
+        continue;
+      }
+
       const dx = x - ellipse.x;
       const dy = y - ellipse.y;
-      const rotatedX = dx * cos - dy * sin;
-      const rotatedY = dx * sin + dy * cos;
-      const normalized = (rotatedX * rotatedX) / (rx * rx) + (rotatedY * rotatedY) / (ry * ry);
-      const value = gray[y * width + x];
+
+      const rotatedX =
+        dx * cos - dy * sin;
+
+      const rotatedY =
+        dx * sin + dy * cos;
+
+      const normalized =
+        (
+          rotatedX * rotatedX
+        ) / (rx * rx)
+        + (
+          rotatedY * rotatedY
+        ) / (ry * ry);
+
+      const value =
+        gray[y * width + x];
+
       if (normalized <= 1) {
         insideSum += value;
         insideCount += 1;
@@ -347,148 +847,421 @@ function meanEllipseAndRing(gray, width, height, ellipse, irisCenter, irisRadius
   }
 
   return {
-    insideMean: insideCount ? insideSum / insideCount : 255,
-    ringMean: ringCount ? ringSum / ringCount : 255,
+    insideMean: insideCount
+      ? insideSum / insideCount
+      : 255,
+
+    ringMean: ringCount
+      ? ringSum / ringCount
+      : 255,
   };
 }
 
-export function selectRefinedPupilCenter(mediaPipeCenter, detectedCenter, confidence) {
-  if (!detectedCenter || !Number.isFinite(confidence) || confidence < PUPIL_FIT_MIN_CONFIDENCE) {
-    return { center: { ...mediaPipeCenter }, source: 'mediapipe', detectedWeight: 0 };
+export function selectRefinedPupilCenter(
+  mediaPipeCenter,
+  detectedCenter,
+  confidence,
+) {
+  if (
+    !detectedCenter
+    || !Number.isFinite(confidence)
+    || confidence
+      < PUPIL_FIT_MIN_CONFIDENCE
+  ) {
+    return {
+      center: {
+        ...mediaPipeCenter,
+      },
+      source: 'mediapipe',
+      detectedWeight: 0,
+    };
   }
-  if (confidence >= PUPIL_FIT_FULL_CONFIDENCE) {
-    return { center: { ...detectedCenter }, source: 'opencv', detectedWeight: 1 };
+
+  if (
+    confidence
+    >= PUPIL_FIT_FULL_CONFIDENCE
+  ) {
+    return {
+      center: {
+        ...detectedCenter,
+      },
+      source: 'opencv',
+      detectedWeight: 1,
+    };
   }
+
   const progress = clamp(
-    (confidence - PUPIL_FIT_MIN_CONFIDENCE)
-      / (PUPIL_FIT_FULL_CONFIDENCE - PUPIL_FIT_MIN_CONFIDENCE),
+    (
+      confidence
+      - PUPIL_FIT_MIN_CONFIDENCE
+    ) / (
+      PUPIL_FIT_FULL_CONFIDENCE
+      - PUPIL_FIT_MIN_CONFIDENCE
+    ),
     0,
     1,
   );
-  const detectedWeight = 0.62 + progress * 0.28;
+
+  const detectedWeight =
+    0.62 + progress * 0.28;
+
   return {
     center: {
-      x: detectedCenter.x * detectedWeight + mediaPipeCenter.x * (1 - detectedWeight),
-      y: detectedCenter.y * detectedWeight + mediaPipeCenter.y * (1 - detectedWeight),
+      x:
+        detectedCenter.x
+          * detectedWeight
+        + mediaPipeCenter.x
+          * (1 - detectedWeight),
+
+      y:
+        detectedCenter.y
+          * detectedWeight
+        + mediaPipeCenter.y
+          * (1 - detectedWeight),
     },
+
     source: 'blended',
     detectedWeight,
   };
 }
 
-function gammaCorrect(cv, source, gamma = 0.85) {
-  if (typeof cv.LUT !== 'function') return source.clone();
-  const lut = new cv.Mat(1, 256, cv.CV_8UC1);
-  for (let index = 0; index < 256; index += 1) {
-    lut.data[index] = clamp(Math.round(255 * ((index / 255) ** gamma)), 0, 255);
+function gammaCorrect(
+  cv,
+  source,
+  gamma = 0.85,
+) {
+  if (
+    typeof cv.LUT !== 'function'
+  ) {
+    return source.clone();
   }
+
+  const lut = new cv.Mat(
+    1,
+    256,
+    cv.CV_8UC1,
+  );
+
+  for (
+    let index = 0;
+    index < 256;
+    index += 1
+  ) {
+    lut.data[index] = clamp(
+      Math.round(
+        255 * (
+          (index / 255) ** gamma
+        ),
+      ),
+      0,
+      255,
+    );
+  }
+
   const output = new cv.Mat();
-  cv.LUT(source, lut, output);
+
+  cv.LUT(
+    source,
+    lut,
+    output,
+  );
+
   lut.delete();
+
   return output;
 }
 
-function collectCircularValues(mat, center, radius) {
+function collectCircularValues(
+  mat,
+  center,
+  radius,
+) {
   const values = [];
   const pixels = mat.data;
-  const xStart = Math.max(0, Math.floor(center.x - radius));
-  const xEnd = Math.min(mat.cols - 1, Math.ceil(center.x + radius));
-  const yStart = Math.max(0, Math.floor(center.y - radius));
-  const yEnd = Math.min(mat.rows - 1, Math.ceil(center.y + radius));
 
-  for (let y = yStart; y <= yEnd; y += 1) {
-    for (let x = xStart; x <= xEnd; x += 1) {
-      if (Math.hypot(x - center.x, y - center.y) <= radius) {
-        values.push(pixels[y * mat.cols + x]);
+  const xStart = Math.max(
+    0,
+    Math.floor(center.x - radius),
+  );
+
+  const xEnd = Math.min(
+    mat.cols - 1,
+    Math.ceil(center.x + radius),
+  );
+
+  const yStart = Math.max(
+    0,
+    Math.floor(center.y - radius),
+  );
+
+  const yEnd = Math.min(
+    mat.rows - 1,
+    Math.ceil(center.y + radius),
+  );
+
+  for (
+    let y = yStart;
+    y <= yEnd;
+    y += 1
+  ) {
+    for (
+      let x = xStart;
+      x <= xEnd;
+      x += 1
+    ) {
+      if (
+        Math.hypot(
+          x - center.x,
+          y - center.y,
+        ) <= radius
+      ) {
+        values.push(
+          pixels[y * mat.cols + x],
+        );
       }
     }
   }
+
   return values;
 }
 
-function pivotContrast(cv, source, pivot, softness = PUPIL_TONE_SOFTNESS) {
-  if (typeof cv.LUT !== 'function') return source.clone();
-  const safeSoftness = Math.max(1, softness);
-  const lut = new cv.Mat(1, 256, cv.CV_8UC1);
-  for (let index = 0; index < 256; index += 1) {
-    // Sigmoid contrast: the pivot maps near mid-gray. Values increasingly
-    // farther below/above it converge smoothly toward black/white.
-    const mapped = 255 / (1 + Math.exp(-(index - pivot) / safeSoftness));
-    lut.data[index] = clamp(Math.round(mapped), 0, 255);
+function pivotContrast(
+  cv,
+  source,
+  pivot,
+  softness = PUPIL_TONE_SOFTNESS,
+) {
+  if (
+    typeof cv.LUT !== 'function'
+  ) {
+    return source.clone();
   }
+
+  const safeSoftness =
+    Math.max(1, softness);
+
+  const lut = new cv.Mat(
+    1,
+    256,
+    cv.CV_8UC1,
+  );
+
+  for (
+    let index = 0;
+    index < 256;
+    index += 1
+  ) {
+    const mapped =
+      255 / (
+        1 + Math.exp(
+          -(index - pivot)
+          / safeSoftness,
+        )
+      );
+
+    lut.data[index] = clamp(
+      Math.round(mapped),
+      0,
+      255,
+    );
+  }
+
   const output = new cv.Mat();
-  cv.LUT(source, lut, output);
+
+  cv.LUT(
+    source,
+    lut,
+    output,
+  );
+
   lut.delete();
+
   return output;
 }
 
 function cloneCanvas(sourceCanvas) {
-  const canvas = document.createElement('canvas');
-  canvas.width = sourceCanvas.width;
-  canvas.height = sourceCanvas.height;
-  canvas.getContext('2d').drawImage(sourceCanvas, 0, 0);
+  const canvas =
+    document.createElement('canvas');
+
+  canvas.width =
+    sourceCanvas.width;
+
+  canvas.height =
+    sourceCanvas.height;
+
+  canvas
+    .getContext('2d')
+    .drawImage(
+      sourceCanvas,
+      0,
+      0,
+    );
+
   return canvas;
 }
 
 function matToCanvas(cv, mat) {
-  const canvas = document.createElement('canvas');
+  const canvas =
+    document.createElement('canvas');
+
   canvas.width = mat.cols;
   canvas.height = mat.rows;
+
   cv.imshow(canvas, mat);
+
   return canvas;
 }
 
-function drawDebugOverlay(cropCanvas, {
-  localIrisCenter,
-  localIrisRadius,
-  mediaPipeCenter,
-  detectedCenter,
-  finalCenter,
-  ellipse,
-  referenceEllipse,
-  scaleX,
-  scaleY,
-  region,
-  confidence,
-  source,
-}) {
-  const canvas = cloneCanvas(cropCanvas);
-  const context = canvas.getContext('2d');
-  const toLocal = (point) => point ? ({
-    x: (point.x - region.x) * scaleX,
-    y: (point.y - region.y) * scaleY,
-  }) : null;
-  const localMediaPipe = toLocal(mediaPipeCenter);
-  const localDetected = toLocal(detectedCenter);
-  const localFinal = toLocal(finalCenter);
+function drawDebugOverlay(
+  cropCanvas,
+  {
+    localIrisCenter,
+    localIrisRadius,
+    mediaPipeCenter,
+    detectedCenter,
+    finalCenter,
+    ellipse,
+    referenceEllipse,
+    scaleX,
+    scaleY,
+    region,
+    confidence,
+    source,
+  },
+) {
+  const canvas =
+    cloneCanvas(cropCanvas);
+
+  const context =
+    canvas.getContext('2d');
+
+  const toLocal = (point) => (
+    point
+      ? {
+        x:
+          (point.x - region.x)
+          * scaleX,
+
+        y:
+          (point.y - region.y)
+          * scaleY,
+      }
+      : null
+  );
+
+  const localMediaPipe =
+    toLocal(mediaPipeCenter);
+
+  const localDetected =
+    toLocal(detectedCenter);
+
+  const localFinal =
+    toLocal(finalCenter);
 
   context.save();
-  context.lineWidth = Math.max(2, canvas.width / 180);
+
+  context.lineWidth = Math.max(
+    2,
+    canvas.width / 180,
+  );
+
   context.strokeStyle = '#f79009';
+
   context.beginPath();
-  context.arc(localIrisCenter.x, localIrisCenter.y, localIrisRadius, 0, Math.PI * 2);
+
+  context.arc(
+    localIrisCenter.x,
+    localIrisCenter.y,
+    localIrisRadius,
+    0,
+    Math.PI * 2,
+  );
+
   context.stroke();
 
-  const drawPoint = (point, color, radius) => {
+  const drawPoint = (
+    point,
+    color,
+    radius,
+  ) => {
     if (!point) return;
+
     context.fillStyle = color;
     context.beginPath();
-    context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+
+    context.arc(
+      point.x,
+      point.y,
+      radius,
+      0,
+      Math.PI * 2,
+    );
+
     context.fill();
   };
 
-  drawPoint(localMediaPipe, '#ffffff', Math.max(3, canvas.width / 85));
-  drawPoint(localDetected, '#7f56d9', Math.max(3, canvas.width / 75));
-  drawPoint(localFinal, '#2e90fa', Math.max(4, canvas.width / 65));
+  drawPoint(
+    localMediaPipe,
+    '#ffffff',
+    Math.max(
+      3,
+      canvas.width / 85,
+    ),
+  );
+
+  drawPoint(
+    localDetected,
+    '#7f56d9',
+    Math.max(
+      3,
+      canvas.width / 75,
+    ),
+  );
+
+  drawPoint(
+    localFinal,
+    '#2e90fa',
+    Math.max(
+      4,
+      canvas.width / 65,
+    ),
+  );
 
   if (referenceEllipse) {
     context.save();
-    context.translate(referenceEllipse.x, referenceEllipse.y);
-    context.rotate((referenceEllipse.angle || 0) * Math.PI / 180);
-    context.strokeStyle = 'rgba(255,255,255,.82)';
-    context.lineWidth = Math.max(1.5, canvas.width / 190);
-    context.setLineDash([Math.max(5, canvas.width / 45), Math.max(4, canvas.width / 60)]);
+
+    context.translate(
+      referenceEllipse.x,
+      referenceEllipse.y,
+    );
+
+    context.rotate(
+      (
+        referenceEllipse.angle || 0
+      ) * Math.PI / 180,
+    );
+
+    context.strokeStyle =
+      'rgba(255,255,255,.82)';
+
+    context.lineWidth = Math.max(
+      1.5,
+      canvas.width / 190,
+    );
+
+    context.setLineDash([
+      Math.max(
+        5,
+        canvas.width / 45,
+      ),
+      Math.max(
+        4,
+        canvas.width / 60,
+      ),
+    ]);
+
     context.beginPath();
+
     context.ellipse(
       0,
       0,
@@ -498,81 +1271,235 @@ function drawDebugOverlay(cropCanvas, {
       0,
       Math.PI * 2,
     );
+
     context.stroke();
     context.restore();
   }
 
   if (ellipse) {
     context.save();
-    context.translate(ellipse.x, ellipse.y);
-    context.rotate((ellipse.angle || 0) * Math.PI / 180);
+
+    context.translate(
+      ellipse.x,
+      ellipse.y,
+    );
+
+    context.rotate(
+      (ellipse.angle || 0)
+      * Math.PI / 180,
+    );
+
     context.strokeStyle = '#7f56d9';
-    context.lineWidth = Math.max(2, canvas.width / 150);
+
+    context.lineWidth = Math.max(
+      2,
+      canvas.width / 150,
+    );
+
     context.beginPath();
-    context.ellipse(0, 0, ellipse.width / 2, ellipse.height / 2, 0, 0, Math.PI * 2);
+
+    context.ellipse(
+      0,
+      0,
+      ellipse.width / 2,
+      ellipse.height / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+
     context.stroke();
     context.restore();
   }
 
-  context.font = `700 ${Math.max(12, Math.round(canvas.width / 24))}px sans-serif`;
+  context.font =
+    `700 ${Math.max(
+      12,
+      Math.round(
+        canvas.width / 24,
+      ),
+    )}px sans-serif`;
+
   context.textBaseline = 'top';
-  const label = `${source} · 신뢰도 ${(confidence * 100).toFixed(0)}%`;
-  const textWidth = context.measureText(label).width;
-  context.fillStyle = 'rgba(2,8,18,.76)';
-  context.fillRect(6, 6, textWidth + 12, Math.max(22, canvas.width / 18));
+
+  const label =
+    `${source} · 신뢰도 ${
+      (confidence * 100).toFixed(0)
+    }%`;
+
+  const textWidth =
+    context.measureText(label).width;
+
+  context.fillStyle =
+    'rgba(2,8,18,.76)';
+
+  context.fillRect(
+    6,
+    6,
+    textWidth + 12,
+    Math.max(
+      22,
+      canvas.width / 18,
+    ),
+  );
+
   context.fillStyle = '#ffffff';
-  context.fillText(label, 12, 9);
+
+  context.fillText(
+    label,
+    12,
+    9,
+  );
+
   context.restore();
+
   return canvas;
 }
 
+function contourGeometry(
+  cv,
+  contour,
+) {
+  const area = Math.max(
+    0,
+    cv.contourArea(
+      contour,
+      false,
+    ),
+  );
 
-function contourGeometry(cv, contour) {
-  const area = Math.max(0, cv.contourArea(contour, false));
-  const perimeter = Math.max(0, cv.arcLength(contour, true));
-  const moments = cv.moments(contour, false);
-  let center = null;
-  if (Math.abs(moments.m00) > 1e-6) {
+  const perimeter = Math.max(
+    0,
+    cv.arcLength(
+      contour,
+      true,
+    ),
+  );
+
+  const moments =
+    cv.moments(contour, false);
+
+  let center;
+
+  if (
+    Math.abs(moments.m00) > 1e-6
+  ) {
     center = {
-      x: moments.m10 / moments.m00,
-      y: moments.m01 / moments.m00,
+      x:
+        moments.m10
+        / moments.m00,
+
+      y:
+        moments.m01
+        / moments.m00,
     };
   } else {
-    const rect = cv.boundingRect(contour);
+    const rect =
+      cv.boundingRect(contour);
+
     center = {
-      x: rect.x + rect.width / 2,
-      y: rect.y + rect.height / 2,
+      x:
+        rect.x + rect.width / 2,
+
+      y:
+        rect.y + rect.height / 2,
     };
   }
+
   return {
     area,
     perimeter,
     center,
-    circularity: perimeter > 0
-      ? clamp(4 * Math.PI * area / (perimeter * perimeter), 0, 1)
-      : 0,
+
+    circularity:
+      perimeter > 0
+        ? clamp(
+          4 * Math.PI * area
+          / (
+            perimeter
+            * perimeter
+          ),
+          0,
+          1,
+        )
+        : 0,
   };
 }
 
-function selectPrimaryContour(cv, contours, localIrisCenter, irisArea, localIrisRadius) {
+function selectPrimaryContour(
+  cv,
+  contours,
+  localIrisCenter,
+  irisArea,
+  localIrisRadius,
+) {
   let best = null;
-  for (let index = 0; index < contours.size(); index += 1) {
-    const contour = contours.get(index);
-    try {
-      const geometry = contourGeometry(cv, contour);
-      const areaRatio = geometry.area / Math.max(1, irisArea);
-      if (areaRatio < PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO || areaRatio > 1.12) continue;
-      const centerDistanceRatio = Math.hypot(
-        geometry.center.x - localIrisCenter.x,
-        geometry.center.y - localIrisCenter.y,
-      ) / Math.max(1, localIrisRadius);
-      if (centerDistanceRatio > 1.05) continue;
 
-      // The component must be substantial and close to the MediaPipe iris
-      // center. This prevents eyelashes or isolated reflections from winning.
-      const proximity = clamp(1 - centerDistanceRatio / 1.05, 0, 1);
-      const componentScore = geometry.area * (0.30 + proximity * 0.70);
-      if (!best || componentScore > best.componentScore) {
+  for (
+    let index = 0;
+    index < contours.size();
+    index += 1
+  ) {
+    const contour =
+      contours.get(index);
+
+    try {
+      const geometry =
+        contourGeometry(
+          cv,
+          contour,
+        );
+
+      const areaRatio =
+        geometry.area
+        / Math.max(1, irisArea);
+
+      if (
+        areaRatio
+          < PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO
+        || areaRatio > 1.12
+      ) {
+        continue;
+      }
+
+      const centerDistanceRatio =
+        Math.hypot(
+          geometry.center.x
+            - localIrisCenter.x,
+
+          geometry.center.y
+            - localIrisCenter.y,
+        ) / Math.max(
+          1,
+          localIrisRadius,
+        );
+
+      if (
+        centerDistanceRatio > 1.05
+      ) {
+        continue;
+      }
+
+      const proximity = clamp(
+        1
+        - centerDistanceRatio
+          / 1.05,
+        0,
+        1,
+      );
+
+      const componentScore =
+        geometry.area
+        * (
+          0.30
+          + proximity * 0.70
+        );
+
+      if (
+        !best
+        || componentScore
+          > best.componentScore
+      ) {
         best = {
           index,
           componentScore,
@@ -585,16 +1512,27 @@ function selectPrimaryContour(cv, contours, localIrisCenter, irisArea, localIris
       contour.delete();
     }
   }
+
   return best;
 }
 
 function contourToPoints(contour) {
   const points = [];
   const data = contour?.data32S;
+
   if (!data) return points;
-  for (let index = 0; index + 1 < data.length; index += 2) {
-    points.push({ x: data[index], y: data[index + 1] });
+
+  for (
+    let index = 0;
+    index + 1 < data.length;
+    index += 2
+  ) {
+    points.push({
+      x: data[index],
+      y: data[index + 1],
+    });
   }
+
   return points;
 }
 
@@ -606,7 +1544,13 @@ function buildFitCandidates(
   localIrisRadius,
 ) {
   const candidates = [];
-  const equivalentRadius = Math.sqrt(Math.max(1, geometry.area) / Math.PI);
+
+  const equivalentRadius =
+    Math.sqrt(
+      Math.max(1, geometry.area)
+      / Math.PI,
+    );
+
   candidates.push({
     type: 'equivalent-circle',
     x: geometry.center.x,
@@ -616,36 +1560,51 @@ function buildFitCandidates(
     angle: 0,
   });
 
-  const contourPoints = contourToPoints(contour);
+  const contourPoints =
+    contourToPoints(contour);
 
-  const visibleArcPoints = selectVisiblePupilArcPoints(
-    contourPoints,
-    {
-      irisCenter: localIrisCenter,
-      irisRadius: localIrisRadius,
-      equivalentRadius,
-      angleBinDegrees: 5,
-    },
-  );
+  const visibleArcPoints =
+    selectVisiblePupilArcPoints(
+      contourPoints,
+      {
+        irisCenter:
+          localIrisCenter,
 
-  const partialFit = fitPartialArcCircle(
-    visibleArcPoints,
-    {
-      minPoints: 10,
-      ransacIterations: 200,
-      irisCenter: localIrisCenter,
-      irisRadius: localIrisRadius,
-      equivalentRadius,
-    },
-  );
+        irisRadius:
+          localIrisRadius,
 
-  if (partialFit) {
-    const centerDistance = Math.hypot(
-      partialFit.x - localIrisCenter.x,
-      partialFit.y - localIrisCenter.y,
+        equivalentRadius,
+
+        angleBinDegrees: 5,
+      },
     );
 
-    const minimumRadius = equivalentRadius * 0.92;
+  const partialFit =
+    fitPartialArcCircle(
+      visibleArcPoints,
+      {
+        minPoints: 10,
+        ransacIterations: 200,
+        irisCenter:
+          localIrisCenter,
+        irisRadius:
+          localIrisRadius,
+        equivalentRadius,
+      },
+    );
+
+  if (partialFit) {
+    const centerDistance =
+      Math.hypot(
+        partialFit.x
+          - localIrisCenter.x,
+
+        partialFit.y
+          - localIrisCenter.y,
+      );
+
+    const minimumRadius =
+      equivalentRadius * 0.92;
 
     const maximumRadius = Math.min(
       localIrisRadius * 1.12,
@@ -653,77 +1612,170 @@ function buildFitCandidates(
     );
 
     if (
-      partialFit.radius >= minimumRadius
-      && partialFit.radius <= maximumRadius
-      && centerDistance <= localIrisRadius * 0.72
+      partialFit.radius
+        >= minimumRadius
+      && partialFit.radius
+        <= maximumRadius
+      && centerDistance
+        <= localIrisRadius * 0.72
     ) {
       candidates.push({
-        type: 'partial-arc-circle',
+        type:
+          'partial-arc-circle',
+
         x: partialFit.x,
         y: partialFit.y,
-        width: partialFit.radius * 2,
-        height: partialFit.radius * 2,
+
+        width:
+          partialFit.radius * 2,
+
+        height:
+          partialFit.radius * 2,
+
         angle: 0,
 
-        arcPointCount: partialFit.pointCount,
+        arcPointCount:
+          partialFit.pointCount,
+
         arcOriginalPointCount:
           partialFit.originalPointCount,
-        arcCoverage: partialFit.arcCoverage,
+
+        arcCoverage:
+          partialFit.arcCoverage,
+
         arcCoverageDegrees:
           partialFit.angularCoverageDegrees,
-        arcResidualMean: partialFit.meanResidual,
-        arcResidualP90: partialFit.p90Residual,
-        arcInlierRatio: partialFit.inlierRatio,
-        arcSideBalance: partialFit.sideBalance,
+
+        arcResidualMean:
+          partialFit.meanResidual,
+
+        arcResidualP90:
+          partialFit.p90Residual,
+
+        arcInlierRatio:
+          partialFit.inlierRatio,
+
+        arcSideBalance:
+          partialFit.sideBalance,
 
         topOcclusionDetected:
-          partialFit.topOcclusionDetected,
-        upperCutSpanRatio:
-          partialFit.upperCutSpanRatio,
+          partialFit
+            .topOcclusionDetected,
 
-        chordRadius: partialFit.chordRadius,
-        chordCenterX: partialFit.chordCenterX,
+        bottomOcclusionDetected:
+          partialFit
+            .bottomOcclusionDetected,
+
+        occlusionDetected:
+          partialFit
+            .occlusionDetected,
+
+        upperCutSpanRatio:
+          partialFit
+            .upperCutSpanRatio,
+
+        lowerCutSpanRatio:
+          partialFit
+            .lowerCutSpanRatio,
+
+        upperExtentRatio:
+          partialFit
+            .upperExtentRatio,
+
+        lowerExtentRatio:
+          partialFit
+            .lowerExtentRatio,
+
+        chordRadius:
+          partialFit.chordRadius,
+
+        chordCenterX:
+          partialFit.chordCenterX,
+
         ransacIterations:
           partialFit.ransacIterations,
 
         radiusExpansionRatio:
           partialFit.radius
-          / Math.max(1, equivalentRadius),
+          / Math.max(
+            1,
+            equivalentRadius,
+          ),
       });
     }
   }
 
-  if (typeof cv.minEnclosingCircle === 'function') {
+  if (
+    typeof cv.minEnclosingCircle
+    === 'function'
+  ) {
     try {
-      const enclosing = cv.minEnclosingCircle(contour);
-      if (enclosing?.center && Number.isFinite(enclosing.radius) && enclosing.radius > 0) {
+      const enclosing =
+        cv.minEnclosingCircle(contour);
+
+      if (
+        enclosing?.center
+        && Number.isFinite(
+          enclosing.radius,
+        )
+        && enclosing.radius > 0
+      ) {
         candidates.push({
-          type: 'enclosing-circle',
+          type:
+            'enclosing-circle',
+
           x: enclosing.center.x,
           y: enclosing.center.y,
-          width: enclosing.radius * 2,
-          height: enclosing.radius * 2,
+
+          width:
+            enclosing.radius * 2,
+
+          height:
+            enclosing.radius * 2,
+
           angle: 0,
         });
       }
     } catch (error) {
-      console.debug('minEnclosingCircle unavailable for this contour.', error);
+      console.debug(
+        'minEnclosingCircle unavailable for this contour.',
+        error,
+      );
     }
   }
 
   if (contour.rows >= 5) {
     const hull = new cv.Mat();
+
     try {
-      cv.convexHull(contour, hull, false, true);
+      cv.convexHull(
+        contour,
+        hull,
+        false,
+        true,
+      );
+
       if (hull.rows >= 5) {
-        const rotatedRect = cv.fitEllipse(hull);
+        const rotatedRect =
+          cv.fitEllipse(hull);
+
         candidates.push({
           type: 'ellipse',
-          x: rotatedRect.center.x,
-          y: rotatedRect.center.y,
-          width: rotatedRect.size.width,
-          height: rotatedRect.size.height,
-          angle: rotatedRect.angle,
+
+          x:
+            rotatedRect.center.x,
+
+          y:
+            rotatedRect.center.y,
+
+          width:
+            rotatedRect.size.width,
+
+          height:
+            rotatedRect.size.height,
+
+          angle:
+            rotatedRect.angle,
         });
       }
     } finally {
@@ -734,14 +1786,36 @@ function buildFitCandidates(
   return candidates;
 }
 
-function drawCandidateMask(cv, rows, cols, candidate) {
-  const shapeMask = cv.Mat.zeros(rows, cols, cv.CV_8UC1);
-  const center = new cv.Point(Math.round(candidate.x), Math.round(candidate.y));
-  if (candidate.type.endsWith('circle')) {
+function drawCandidateMask(
+  cv,
+  rows,
+  cols,
+  candidate,
+) {
+  const shapeMask =
+    cv.Mat.zeros(
+      rows,
+      cols,
+      cv.CV_8UC1,
+    );
+
+  const center = new cv.Point(
+    Math.round(candidate.x),
+    Math.round(candidate.y),
+  );
+
+  if (
+    candidate.type.endsWith('circle')
+  ) {
     cv.circle(
       shapeMask,
       center,
-      Math.max(1, Math.round(candidate.width / 2)),
+      Math.max(
+        1,
+        Math.round(
+          candidate.width / 2,
+        ),
+      ),
       new cv.Scalar(255),
       -1,
     );
@@ -750,8 +1824,18 @@ function drawCandidateMask(cv, rows, cols, candidate) {
       shapeMask,
       center,
       new cv.Size(
-        Math.max(1, Math.round(candidate.width / 2)),
-        Math.max(1, Math.round(candidate.height / 2)),
+        Math.max(
+          1,
+          Math.round(
+            candidate.width / 2,
+          ),
+        ),
+        Math.max(
+          1,
+          Math.round(
+            candidate.height / 2,
+          ),
+        ),
       ),
       candidate.angle || 0,
       0,
@@ -760,6 +1844,7 @@ function drawCandidateMask(cv, rows, cols, candidate) {
       -1,
     );
   }
+
   return shapeMask;
 }
 
@@ -773,122 +1858,244 @@ function evaluateFitCandidate(
   localIrisDiameter,
   contourGeometryResult,
 ) {
-  const shapeMask = drawCandidateMask(cv, componentMask.rows, componentMask.cols, candidate);
-  const intersection = new cv.Mat();
-  const union = new cv.Mat();
-  try {
-    cv.bitwise_and(componentMask, shapeMask, intersection);
-    cv.bitwise_or(componentMask, shapeMask, union);
-    const intersectionArea = cv.countNonZero(intersection);
-    const unionArea = cv.countNonZero(union);
-    const componentArea = cv.countNonZero(componentMask);
-    const shapeArea = cv.countNonZero(shapeMask);
-    const iou = unionArea > 0 ? intersectionArea / unionArea : 0;
-    const coverage = componentArea > 0 ? intersectionArea / componentArea : 0;
-    const precision = shapeArea > 0 ? intersectionArea / shapeArea : 0;
-    const centerDistanceRatio = Math.hypot(
-      candidate.x - localIrisCenter.x,
-      candidate.y - localIrisCenter.y,
-    ) / Math.max(1, localIrisRadius);
-    const majorAxis = Math.max(candidate.width, candidate.height);
-    const minorAxis = Math.min(candidate.width, candidate.height);
-    const axisRatio = minorAxis / Math.max(1, majorAxis);
-    const diameterRatio = majorAxis / Math.max(1, localIrisDiameter);
-    const fitScore = scorePupilFitMetrics({
-      iou,
-      coverage,
-      precision,
-      centerDistanceRatio,
-      axisRatio,
-      diameterRatio,
-    });
-    const intensity = meanEllipseAndRing(
-      blurred.data,
-      blurred.cols,
-      blurred.rows,
+  const shapeMask =
+    drawCandidateMask(
+      cv,
+      componentMask.rows,
+      componentMask.cols,
       candidate,
-      localIrisCenter,
-      localIrisRadius,
     );
-    const contrast = clamp((intensity.ringMean - intensity.insideMean) / 70, 0, 1);
+
+  const intersection =
+    new cv.Mat();
+
+  const union =
+    new cv.Mat();
+
+  try {
+    cv.bitwise_and(
+      componentMask,
+      shapeMask,
+      intersection,
+    );
+
+    cv.bitwise_or(
+      componentMask,
+      shapeMask,
+      union,
+    );
+
+    const intersectionArea =
+      cv.countNonZero(intersection);
+
+    const unionArea =
+      cv.countNonZero(union);
+
+    const componentArea =
+      cv.countNonZero(
+        componentMask,
+      );
+
+    const shapeArea =
+      cv.countNonZero(shapeMask);
+
+    const iou =
+      unionArea > 0
+        ? intersectionArea
+          / unionArea
+        : 0;
+
+    const coverage =
+      componentArea > 0
+        ? intersectionArea
+          / componentArea
+        : 0;
+
+    const precision =
+      shapeArea > 0
+        ? intersectionArea
+          / shapeArea
+        : 0;
+
+    const centerDistanceRatio =
+      Math.hypot(
+        candidate.x
+          - localIrisCenter.x,
+
+        candidate.y
+          - localIrisCenter.y,
+      ) / Math.max(
+        1,
+        localIrisRadius,
+      );
+
+    const majorAxis = Math.max(
+      candidate.width,
+      candidate.height,
+    );
+
+    const minorAxis = Math.min(
+      candidate.width,
+      candidate.height,
+    );
+
+    const axisRatio =
+      minorAxis
+      / Math.max(1, majorAxis);
+
+    const diameterRatio =
+      majorAxis
+      / Math.max(
+        1,
+        localIrisDiameter,
+      );
+
+    const fitScore =
+      scorePupilFitMetrics({
+        iou,
+        coverage,
+        precision,
+        centerDistanceRatio,
+        axisRatio,
+        diameterRatio,
+      });
+
+    const intensity =
+      meanEllipseAndRing(
+        blurred.data,
+        blurred.cols,
+        blurred.rows,
+        candidate,
+        localIrisCenter,
+        localIrisRadius,
+      );
+
+    const contrast = clamp(
+      (
+        intensity.ringMean
+        - intensity.insideMean
+      ) / 70,
+      0,
+      1,
+    );
+
+    const isPartial =
+      candidate.type
+      === 'partial-arc-circle';
+
     const arcResidualScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
           1
-            - candidate.arcResidualP90
-              / Math.max(2.2, majorAxis * 0.045),
+          - candidate.arcResidualP90
+            / Math.max(
+              2.2,
+              majorAxis * 0.045,
+            ),
           0,
           1,
         )
         : 0;
 
     const arcCoverageScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
-          (candidate.arcCoverage - 0.32) / 0.48,
+          (
+            candidate.arcCoverage
+            - 0.32
+          ) / 0.48,
           0,
           1,
         )
         : 0;
 
     const arcSideBalanceScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
-          (candidate.arcSideBalance - 0.25) / 0.75,
+          (
+            candidate.arcSideBalance
+            - 0.25
+          ) / 0.75,
           0,
           1,
         )
         : 0;
 
     const arcInlierScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
-          (candidate.arcInlierRatio - 0.45) / 0.45,
+          (
+            candidate.arcInlierRatio
+            - 0.45
+          ) / 0.45,
           0,
           1,
         )
         : 0;
 
     const centerPriorScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
-          1 - centerDistanceRatio / 0.70,
+          1
+          - centerDistanceRatio
+            / 0.70,
           0,
           1,
         )
         : 0;
 
+    // 위쪽·아래쪽 어느 방향의 가림에도 동일한 보너스를 준다.
     const occlusionBonus =
-      candidate.type === 'partial-arc-circle'
-      && candidate.topOcclusionDetected
+      isPartial
+      && (
+        candidate.occlusionDetected
+        || candidate
+          .topOcclusionDetected
+        || candidate
+          .bottomOcclusionDetected
+      )
         ? 0.04
         : 0;
 
     const selectionScore =
-      candidate.type === 'partial-arc-circle'
+      isPartial
         ? clamp(
           arcResidualScore * 0.45
-            + arcCoverageScore * 0.20
-            + arcSideBalanceScore * 0.15
-            + centerPriorScore * 0.15
-            + arcInlierScore * 0.05
-            + occlusionBonus,
+          + arcCoverageScore * 0.20
+          + arcSideBalanceScore * 0.15
+          + centerPriorScore * 0.15
+          + arcInlierScore * 0.05
+          + occlusionBonus,
           0,
           1,
         )
         : fitScore;
+
     const confidence = clamp(
-      Math.max(selectionScore, selectionScore * 0.90 + contrast * 0.10),
+      Math.max(
+        selectionScore,
+        selectionScore * 0.90
+          + contrast * 0.10,
+      ),
       0,
       1,
     );
 
     return {
       ...candidate,
-      score: selectionScore,
-      baseFitScore: fitScore,
+
+      score:
+        selectionScore,
+
+      baseFitScore:
+        fitScore,
+
       arcResidualScore,
       arcCoverageScore,
+      arcSideBalanceScore,
+      arcInlierScore,
+      centerPriorScore,
+
       confidence,
       iou,
       coverage,
@@ -897,11 +2104,14 @@ function evaluateFitCandidate(
       axisRatio,
       diameterRatio,
       contrast,
-      arcSideBalanceScore,
-      arcInlierScore,
-      centerPriorScore,
-      circularity: contourGeometryResult.circularity,
-      areaRatio: contourGeometryResult.areaRatio,
+
+      circularity:
+        contourGeometryResult
+          .circularity,
+
+      areaRatio:
+        contourGeometryResult
+          .areaRatio,
     };
   } finally {
     shapeMask.delete();
@@ -910,57 +2120,185 @@ function evaluateFitCandidate(
   }
 }
 
-function buildFallbackDebug(source, landmarks, side, width, height, reason) {
-  const region = calculateEyeRegion(landmarks, side, width, height);
-  const targetWidth = clamp(Math.round(region.width * 4), 220, 480);
-  const crop = drawRegion(source, region, targetWidth);
-  const definition = EYE_DEFINITIONS[side];
-  const mediaPipeCenter = pointToPixel(landmarks[definition.irisCenter], width, height);
+function buildFallbackDebug(
+  source,
+  landmarks,
+  side,
+  width,
+  height,
+  reason,
+) {
+  const region =
+    calculateEyeRegion(
+      landmarks,
+      side,
+      width,
+      height,
+    );
+
+  const targetWidth = clamp(
+    Math.round(
+      region.width * 4,
+    ),
+    220,
+    480,
+  );
+
+  const crop =
+    drawRegion(
+      source,
+      region,
+      targetWidth,
+    );
+
+  const definition =
+    EYE_DEFINITIONS[side];
+
+  const mediaPipeCenter =
+    pointToPixel(
+      landmarks[
+        definition.irisCenter
+      ],
+      width,
+      height,
+    );
+
   const localCenter = {
-    x: (mediaPipeCenter.x - region.x) * crop.scaleX,
-    y: (mediaPipeCenter.y - region.y) * crop.scaleY,
+    x:
+      (
+        mediaPipeCenter.x
+        - region.x
+      ) * crop.scaleX,
+
+    y:
+      (
+        mediaPipeCenter.y
+        - region.y
+      ) * crop.scaleY,
   };
-  const overlay = cloneCanvas(crop.canvas);
-  const context = overlay.getContext('2d');
+
+  const overlay =
+    cloneCanvas(crop.canvas);
+
+  const context =
+    overlay.getContext('2d');
+
   context.fillStyle = '#ffffff';
   context.beginPath();
-  context.arc(localCenter.x, localCenter.y, Math.max(4, overlay.width / 65), 0, Math.PI * 2);
+
+  context.arc(
+    localCenter.x,
+    localCenter.y,
+    Math.max(
+      4,
+      overlay.width / 65,
+    ),
+    0,
+    Math.PI * 2,
+  );
+
   context.fill();
+
   return {
     darkThreshold: null,
     targetWidth,
     reason,
+
     stages: [
       {
         key: 'crop',
         label: '1. 원본 눈 crop',
-        description: 'MediaPipe 눈 랜드마크 기준으로 고해상도 원본에서 잘라낸 영역',
-        canvas: cloneCanvas(crop.canvas),
+        description:
+          'MediaPipe 눈 랜드마크 기준으로 고해상도 원본에서 잘라낸 영역',
+        canvas:
+          cloneCanvas(crop.canvas),
       },
       {
         key: 'fallback',
-        label: '2. MediaPipe fallback',
-        description: `OpenCV 정밀 검출을 사용하지 못해 흰 점의 홍채 중심을 사용함 · ${reason}`,
+        label:
+          '2. MediaPipe fallback',
+        description:
+          `OpenCV 정밀 검출을 사용하지 못해 흰 점의 홍채 중심을 사용함 · ${reason}`,
         canvas: overlay,
       },
     ],
   };
 }
 
-function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { includeDebug = false } = {}) {
-  const region = calculateEyeRegion(landmarks, side, width, height);
-  const targetWidth = clamp(Math.round(region.width * 4), 220, 480);
-  const crop = drawRegion(source, region, targetWidth);
-  const definition = EYE_DEFINITIONS[side];
-  const mediaPipeCenter = pointToPixel(landmarks[definition.irisCenter], width, height);
+function detectPupilWithOpenCv(
+  cv,
+  source,
+  landmarks,
+  side,
+  width,
+  height,
+  {
+    includeDebug = false,
+  } = {},
+) {
+  const region =
+    calculateEyeRegion(
+      landmarks,
+      side,
+      width,
+      height,
+    );
+
+  const targetWidth = clamp(
+    Math.round(
+      region.width * 4,
+    ),
+    220,
+    480,
+  );
+
+  const crop =
+    drawRegion(
+      source,
+      region,
+      targetWidth,
+    );
+
+  const definition =
+    EYE_DEFINITIONS[side];
+
+  const mediaPipeCenter =
+    pointToPixel(
+      landmarks[
+        definition.irisCenter
+      ],
+      width,
+      height,
+    );
+
   const scaleX = crop.scaleX;
   const scaleY = crop.scaleY;
+
   const localIrisCenter = {
-    x: (mediaPipeCenter.x - region.x) * scaleX,
-    y: (mediaPipeCenter.y - region.y) * scaleY,
+    x:
+      (
+        mediaPipeCenter.x
+        - region.x
+      ) * scaleX,
+
+    y:
+      (
+        mediaPipeCenter.y
+        - region.y
+      ) * scaleY,
   };
-  const localIrisDiameter = region.irisDiameter * ((scaleX + scaleY) / 2);
-  const localIrisRadius = Math.max(5, localIrisDiameter * 0.55);
+
+  const localIrisDiameter =
+    region.irisDiameter
+    * (
+      (scaleX + scaleY) / 2
+    );
+
+  const localIrisRadius =
+    Math.max(
+      5,
+      localIrisDiameter * 0.55,
+    );
 
   let sourceMat;
   let gray;
@@ -979,92 +2317,225 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
   let hierarchy;
 
   try {
-    sourceMat = cv.imread(crop.canvas);
-    gray = new cv.Mat();
-    cv.cvtColor(sourceMat, gray, cv.COLOR_RGBA2GRAY);
-    gamma = gammaCorrect(cv, gray, 0.85);
+    sourceMat =
+      cv.imread(crop.canvas);
 
-    // Replace global histogram equalization, which can over-darken eyelid
-    // shadows, with a dark-side adaptive pivot and sigmoid contrast curve.
-    const gammaIrisValues = collectCircularValues(gamma, localIrisCenter, localIrisRadius);
+    gray = new cv.Mat();
+
+    cv.cvtColor(
+      sourceMat,
+      gray,
+      cv.COLOR_RGBA2GRAY,
+    );
+
+    gamma =
+      gammaCorrect(
+        cv,
+        gray,
+        0.85,
+      );
+
+    const gammaIrisValues =
+      collectCircularValues(
+        gamma,
+        localIrisCenter,
+        localIrisRadius,
+      );
+
     const tonePivot = clamp(
-      percentile(gammaIrisValues, PUPIL_TONE_PIVOT_PERCENTILE),
+      percentile(
+        gammaIrisValues,
+        PUPIL_TONE_PIVOT_PERCENTILE,
+      ),
       8,
       110,
     );
-    enhanced = pivotContrast(cv, gamma, tonePivot, PUPIL_TONE_SOFTNESS);
+
+    enhanced =
+      pivotContrast(
+        cv,
+        gamma,
+        tonePivot,
+        PUPIL_TONE_SOFTNESS,
+      );
 
     blurred = new cv.Mat();
-    cv.GaussianBlur(enhanced, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
 
-    mask = cv.Mat.zeros(blurred.rows, blurred.cols, cv.CV_8UC1);
+    cv.GaussianBlur(
+      enhanced,
+      blurred,
+      new cv.Size(5, 5),
+      0,
+      0,
+      cv.BORDER_DEFAULT,
+    );
+
+    mask = cv.Mat.zeros(
+      blurred.rows,
+      blurred.cols,
+      cv.CV_8UC1,
+    );
+
     cv.circle(
       mask,
-      new cv.Point(Math.round(localIrisCenter.x), Math.round(localIrisCenter.y)),
-      Math.round(localIrisRadius),
+      new cv.Point(
+        Math.round(
+          localIrisCenter.x,
+        ),
+        Math.round(
+          localIrisCenter.y,
+        ),
+      ),
+      Math.round(
+        localIrisRadius,
+      ),
       new cv.Scalar(255),
       -1,
     );
 
-    const irisValues = collectCircularValues(blurred, localIrisCenter, localIrisRadius);
+    const irisValues =
+      collectCircularValues(
+        blurred,
+        localIrisCenter,
+        localIrisRadius,
+      );
+
     const darkThreshold = clamp(
-      percentile(irisValues, PUPIL_THRESHOLD_PERCENTILE) + PUPIL_THRESHOLD_OFFSET,
+      percentile(
+        irisValues,
+        PUPIL_THRESHOLD_PERCENTILE,
+      ) + PUPIL_THRESHOLD_OFFSET,
       PUPIL_THRESHOLD_MIN,
       PUPIL_THRESHOLD_MAX,
     );
 
     binary = new cv.Mat();
-    cv.threshold(blurred, binary, darkThreshold, 255, cv.THRESH_BINARY_INV);
-    maskedBinary = new cv.Mat();
-    cv.bitwise_and(binary, mask, maskedBinary);
-    kernelSmall = cv.getStructuringElement(
-      cv.MORPH_ELLIPSE,
-      new cv.Size(PUPIL_OPEN_KERNEL_SIZE, PUPIL_OPEN_KERNEL_SIZE),
+
+    cv.threshold(
+      blurred,
+      binary,
+      darkThreshold,
+      255,
+      cv.THRESH_BINARY_INV,
     );
-    kernelLarge = cv.getStructuringElement(
-      cv.MORPH_ELLIPSE,
-      new cv.Size(PUPIL_CLOSE_KERNEL_SIZE, PUPIL_CLOSE_KERNEL_SIZE),
+
+    maskedBinary =
+      new cv.Mat();
+
+    cv.bitwise_and(
+      binary,
+      mask,
+      maskedBinary,
     );
+
+    kernelSmall =
+      cv.getStructuringElement(
+        cv.MORPH_ELLIPSE,
+        new cv.Size(
+          PUPIL_OPEN_KERNEL_SIZE,
+          PUPIL_OPEN_KERNEL_SIZE,
+        ),
+      );
+
+    kernelLarge =
+      cv.getStructuringElement(
+        cv.MORPH_ELLIPSE,
+        new cv.Size(
+          PUPIL_CLOSE_KERNEL_SIZE,
+          PUPIL_CLOSE_KERNEL_SIZE,
+        ),
+      );
+
     opened = new cv.Mat();
     closed = new cv.Mat();
-    cv.morphologyEx(maskedBinary, opened, cv.MORPH_OPEN, kernelSmall);
-    cv.morphologyEx(opened, closed, cv.MORPH_CLOSE, kernelLarge);
 
-    const irisArea = Math.PI * localIrisRadius * localIrisRadius;
+    cv.morphologyEx(
+      maskedBinary,
+      opened,
+      cv.MORPH_OPEN,
+      kernelSmall,
+    );
+
+    cv.morphologyEx(
+      opened,
+      closed,
+      cv.MORPH_CLOSE,
+      kernelLarge,
+    );
+
+    const irisArea =
+      Math.PI
+      * localIrisRadius
+      * localIrisRadius;
+
     const maxHolePixels = clamp(
-      Math.round(irisArea * PUPIL_HOLE_MAX_AREA_RATIO),
+      Math.round(
+        irisArea
+        * PUPIL_HOLE_MAX_AREA_RATIO,
+      ),
       PUPIL_HOLE_MAX_AREA_MIN,
       PUPIL_HOLE_MAX_AREA_MAX,
     );
-    const holeFill = fillSmallBlackHoles4Connected(
-      closed.data,
-      closed.cols,
-      closed.rows,
-      maxHolePixels,
+
+    const holeFill =
+      fillSmallBlackHoles4Connected(
+        closed.data,
+        closed.cols,
+        closed.rows,
+        maxHolePixels,
+      );
+
+    holeFilled =
+      closed.clone();
+
+    holeFilled.data.set(
+      holeFill.data,
     );
-    holeFilled = closed.clone();
-    holeFilled.data.set(holeFill.data);
 
-    contours = new cv.MatVector();
-    hierarchy = new cv.Mat();
-    cv.findContours(holeFilled, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+    contours =
+      new cv.MatVector();
 
-    const primary = selectPrimaryContour(
-      cv,
+    hierarchy =
+      new cv.Mat();
+
+    cv.findContours(
+      holeFilled,
       contours,
-      localIrisCenter,
-      irisArea,
-      localIrisRadius,
+      hierarchy,
+      cv.RETR_EXTERNAL,
+      cv.CHAIN_APPROX_NONE,
     );
+
+    const primary =
+      selectPrimaryContour(
+        cv,
+        contours,
+        localIrisCenter,
+        irisArea,
+        localIrisRadius,
+      );
+
     let componentMask = null;
     let selectedContour = null;
-    let fitSelection = { best: null, accepted: false, reason: 'no-component' };
+
+    let fitSelection = {
+      best: null,
+      accepted: false,
+      reason: 'no-component',
+    };
+
     let displayCandidate = null;
     let evaluatedCandidates = [];
     let best = null;
 
     if (primary) {
-      componentMask = cv.Mat.zeros(holeFilled.rows, holeFilled.cols, cv.CV_8UC1);
+      componentMask =
+        cv.Mat.zeros(
+          holeFilled.rows,
+          holeFilled.cols,
+          cv.CV_8UC1,
+        );
+
       cv.drawContours(
         componentMask,
         contours,
@@ -1072,198 +2543,513 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
         new cv.Scalar(255),
         -1,
       );
-      selectedContour = contours.get(primary.index);
-      const candidates = buildFitCandidates(
-        cv,
-        selectedContour,
-        primary,
-        localIrisCenter,
-        localIrisRadius,
-      );
-      evaluatedCandidates = candidates.map((candidate) => evaluateFitCandidate(
-        cv,
-        candidate,
-        componentMask,
-        blurred,
-        localIrisCenter,
-        localIrisRadius,
-        localIrisDiameter,
-        primary,
-      ));
-      fitSelection = chooseOcclusionAwarePupilFit(evaluatedCandidates);
-      displayCandidate = fitSelection.best;
 
-      if (fitSelection.accepted && fitSelection.best) {
-        const fitted = fitSelection.best;
+      selectedContour =
+        contours.get(primary.index);
+
+      const candidates =
+        buildFitCandidates(
+          cv,
+          selectedContour,
+          primary,
+          localIrisCenter,
+          localIrisRadius,
+        );
+
+      evaluatedCandidates =
+        candidates.map(
+          (candidate) =>
+            evaluateFitCandidate(
+              cv,
+              candidate,
+              componentMask,
+              blurred,
+              localIrisCenter,
+              localIrisRadius,
+              localIrisDiameter,
+              primary,
+            ),
+        );
+
+      fitSelection =
+        chooseOcclusionAwarePupilFit(
+          evaluatedCandidates,
+        );
+
+      displayCandidate =
+        fitSelection.best;
+
+      if (
+        fitSelection.accepted
+        && fitSelection.best
+      ) {
+        const fitted =
+          fitSelection.best;
+
+        const circleScale =
+          fitted.type.endsWith(
+            'circle',
+          )
+            ? PUPIL_FINAL_CIRCLE_SCALE
+            : 1;
+
         const detectedCenter = {
-          x: region.x + fitted.x / scaleX,
-          y: region.y + fitted.y / scaleY,
+          x:
+            region.x
+            + fitted.x / scaleX,
+
+          y:
+            region.y
+            + fitted.y / scaleY,
         };
+
         best = {
           ...fitted,
+
           detectedCenter,
+
           localEllipse: {
             x: fitted.x,
             y: fitted.y,
-            width: fitted.width,
-            height: fitted.height,
-            angle: fitted.angle || 0,
+
+            width:
+              fitted.width
+              * circleScale,
+
+            height:
+              fitted.height
+              * circleScale,
+
+            angle:
+              fitted.angle || 0,
           },
+
           ellipseGlobal: {
-            x: detectedCenter.x,
-            y: detectedCenter.y,
-            width: fitted.width / scaleX,
-            height: fitted.height / scaleY,
-            angle: fitted.angle || 0,
+            x:
+              detectedCenter.x,
+
+            y:
+              detectedCenter.y,
+
+            width:
+              fitted.width
+              * circleScale
+              / scaleX,
+
+            height:
+              fitted.height
+              * circleScale
+              / scaleY,
+
+            angle:
+              fitted.angle || 0,
           },
-          fitType: fitted.type,
-          componentScore: primary.componentScore,
+
+          fitType:
+            fitted.type,
+
+          componentScore:
+            primary.componentScore,
+
           accepted: true,
         };
       }
     }
 
-    try { selectedContour?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
+    try {
+      selectedContour?.delete();
+    } catch {
+      // OpenCV 해제 오류 무시
+    }
+
     selectedContour = null;
-    try { componentMask?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
+
+    try {
+      componentMask?.delete();
+    } catch {
+      // OpenCV 해제 오류 무시
+    }
+
     componentMask = null;
 
-    const selected = selectRefinedPupilCenter(mediaPipeCenter, best?.detectedCenter, best?.confidence ?? 0);
+    const selected =
+      selectRefinedPupilCenter(
+        mediaPipeCenter,
+        best?.detectedCenter,
+        best?.confidence ?? 0,
+      );
+
     let debug = null;
+
     if (includeDebug) {
       const fitTypeLabels = {
-        'equivalent-circle': '중심·면적 원',
-        'partial-arc-circle': '부분 원호 복원 원',
-        'enclosing-circle': '외접원',
-        ellipse: '타원',
+        'equivalent-circle':
+          '중심·면적 원',
+
+        'partial-arc-circle':
+          '부분 원호 복원 원',
+
+        'enclosing-circle':
+          '외접원',
+
+        ellipse:
+          '타원',
       };
-      const shownFit = best ?? displayCandidate;
-      const shownDetectedCenter = shownFit ? {
-        x: region.x + shownFit.x / scaleX,
-        y: region.y + shownFit.y / scaleY,
-      } : null;
-      const shownEllipse = shownFit ? {
-        x: shownFit.x,
-        y: shownFit.y,
-        width: shownFit.width,
-        height: shownFit.height,
-        angle: shownFit.angle || 0,
-      } : null;
-      const equivalentCandidate = evaluatedCandidates.find(
-        (candidate) => candidate.type === 'equivalent-circle',
-      );
-      const referenceEllipse = shownFit?.type === 'partial-arc-circle' && equivalentCandidate
-        ? {
-          x: equivalentCandidate.x,
-          y: equivalentCandidate.y,
-          width: equivalentCandidate.width,
-          height: equivalentCandidate.height,
-          angle: 0,
-        }
-        : null;
-      const fitLabel = shownFit ? fitTypeLabels[shownFit.type] || shownFit.type : '후보 없음';
-      const sourceLabel = selected.source === 'opencv'
-        ? `OpenCV ${fitLabel}`
-        : selected.source === 'blended'
-          ? `OpenCV ${fitLabel}+MediaPipe 융합`
-          : shownFit ? `${fitLabel} 후보 거절` : 'MediaPipe fallback';
-      const finalOverlay = drawDebugOverlay(crop.canvas, {
-        localIrisCenter,
-        localIrisRadius,
-        mediaPipeCenter,
-        detectedCenter: shownDetectedCenter,
-        finalCenter: selected.center,
-        ellipse: shownEllipse,
-        referenceEllipse,
-        scaleX,
-        scaleY,
-        region,
-        confidence: best?.confidence ?? displayCandidate?.confidence ?? 0,
-        source: sourceLabel,
-      });
+
+      const shownFit =
+        best ?? displayCandidate;
+
+      const shownDetectedCenter =
+        shownFit
+          ? {
+            x:
+              region.x
+              + shownFit.x / scaleX,
+
+            y:
+              region.y
+              + shownFit.y / scaleY,
+          }
+          : null;
+
+      const shownCircleScale =
+        shownFit?.type?.endsWith(
+          'circle',
+        )
+          ? PUPIL_FINAL_CIRCLE_SCALE
+          : 1;
+
+      const shownEllipse =
+        shownFit
+          ? {
+            x: shownFit.x,
+            y: shownFit.y,
+
+            width:
+              shownFit.width
+              * shownCircleScale,
+
+            height:
+              shownFit.height
+              * shownCircleScale,
+
+            angle:
+              shownFit.angle || 0,
+          }
+          : null;
+
+      const equivalentCandidate =
+        evaluatedCandidates.find(
+          (candidate) =>
+            candidate.type
+            === 'equivalent-circle',
+        );
+
+      const referenceEllipse =
+        shownFit?.type
+          === 'partial-arc-circle'
+        && equivalentCandidate
+          ? {
+            x:
+              equivalentCandidate.x,
+
+            y:
+              equivalentCandidate.y,
+
+            width:
+              equivalentCandidate.width,
+
+            height:
+              equivalentCandidate.height,
+
+            angle: 0,
+          }
+          : null;
+
+      const fitLabel = shownFit
+        ? (
+          fitTypeLabels[
+            shownFit.type
+          ] || shownFit.type
+        )
+        : '후보 없음';
+
+      const sourceLabel =
+        selected.source === 'opencv'
+          ? `OpenCV ${fitLabel}`
+          : selected.source === 'blended'
+            ? `OpenCV ${fitLabel}+MediaPipe 융합`
+            : shownFit
+              ? `${fitLabel} 후보 거절`
+              : 'MediaPipe fallback';
+
+      const finalOverlay =
+        drawDebugOverlay(
+          crop.canvas,
+          {
+            localIrisCenter,
+            localIrisRadius,
+            mediaPipeCenter,
+
+            detectedCenter:
+              shownDetectedCenter,
+
+            finalCenter:
+              selected.center,
+
+            ellipse:
+              shownEllipse,
+
+            referenceEllipse,
+            scaleX,
+            scaleY,
+            region,
+
+            confidence:
+              best?.confidence
+              ?? displayCandidate
+                ?.confidence
+              ?? 0,
+
+            source:
+              sourceLabel,
+          },
+        );
+
+      let occlusionText =
+        '명확한 눈꺼풀 가림 없음';
+
+      if (
+        displayCandidate
+          ?.topOcclusionDetected
+        && displayCandidate
+          ?.bottomOcclusionDetected
+      ) {
+        occlusionText =
+          '위·아래 눈꺼풀 가림 감지';
+      } else if (
+        displayCandidate
+          ?.topOcclusionDetected
+      ) {
+        occlusionText =
+          '위쪽 눈꺼풀 가림 감지';
+      } else if (
+        displayCandidate
+          ?.bottomOcclusionDetected
+      ) {
+        occlusionText =
+          '아래쪽 눈꺼풀 가림 감지';
+      }
+
       debug = {
         darkThreshold,
         tonePivot,
-        toneSoftness: PUPIL_TONE_SOFTNESS,
+
+        toneSoftness:
+          PUPIL_TONE_SOFTNESS,
+
         targetWidth,
         localIrisDiameter,
-        contourCount: contours.size(),
+
+        contourCount:
+          contours.size(),
+
         holeFill,
+
         stages: [
           {
             key: 'crop',
-            label: '1. 원본 눈 crop',
-            description: `원본에서 눈 주변을 잘라 ${crop.canvas.width}×${crop.canvas.height}px로 확대`,
-            canvas: cloneCanvas(crop.canvas),
+            label:
+              '1. 원본 눈 crop',
+
+            description:
+              `원본에서 눈 주변을 잘라 ${crop.canvas.width}×${crop.canvas.height}px로 확대`,
+
+            canvas:
+              cloneCanvas(
+                crop.canvas,
+              ),
           },
           {
             key: 'gray',
-            label: '2. 회색조 변환',
-            description: 'RGB 색상 정보를 제거하고 밝기 정보만 유지',
-            canvas: matToCanvas(cv, gray),
+            label:
+              '2. 회색조 변환',
+
+            description:
+              'RGB 색상 정보를 제거하고 밝기 정보만 유지',
+
+            canvas:
+              matToCanvas(
+                cv,
+                gray,
+              ),
           },
           {
             key: 'gamma',
-            label: '3. Gamma 보정',
-            description: '어두운 갈색 홍채와 동공의 명암 차이를 강화',
-            canvas: matToCanvas(cv, gamma),
+            label:
+              '3. Gamma 보정',
+
+            description:
+              '어두운 갈색 홍채와 동공의 명암 차이를 강화',
+
+            canvas:
+              matToCanvas(
+                cv,
+                gamma,
+              ),
           },
           {
             key: 'equalized',
-            label: '4. 피벗 대비 보정',
-            description: `홍채의 어두운 쪽 ${Math.round(PUPIL_TONE_PIVOT_PERCENTILE * 100)}백분위(${tonePivot})를 기준으로, 멀어질수록 검정·흰색에 가깝게 분리`,
-            canvas: matToCanvas(cv, enhanced),
+            label:
+              '4. 피벗 대비 보정',
+
+            description:
+              `홍채의 어두운 쪽 ${Math.round(
+                PUPIL_TONE_PIVOT_PERCENTILE
+                * 100,
+              )}백분위(${tonePivot})를 기준으로, 멀어질수록 검정·흰색에 가깝게 분리`,
+
+            canvas:
+              matToCanvas(
+                cv,
+                enhanced,
+              ),
           },
           {
             key: 'blurred',
-            label: '5. Gaussian blur',
-            description: '속눈썹·센서 잡음 같은 고주파 노이즈를 완화',
-            canvas: matToCanvas(cv, blurred),
+            label:
+              '5. Gaussian blur',
+
+            description:
+              '속눈썹·센서 잡음 같은 고주파 노이즈를 완화',
+
+            canvas:
+              matToCanvas(
+                cv,
+                blurred,
+              ),
           },
           {
             key: 'mask',
-            label: '6. 홍채 탐색 마스크',
-            description: 'MediaPipe 홍채 중심 주변만 남겨 눈꺼풀과 속눈썹 후보를 제한',
-            canvas: matToCanvas(cv, mask),
+            label:
+              '6. 홍채 탐색 마스크',
+
+            description:
+              'MediaPipe 홍채 중심 주변만 남겨 눈꺼풀과 속눈썹 후보를 제한',
+
+            canvas:
+              matToCanvas(
+                cv,
+                mask,
+              ),
           },
           {
             key: 'threshold',
-            label: '7. 어두운 영역 이진화',
-            description: `홍채 내부 ${Math.round(PUPIL_THRESHOLD_PERCENTILE * 100)}백분위 + ${PUPIL_THRESHOLD_OFFSET} 기준 임계값 ${darkThreshold}로 중간 정도의 어두운 픽셀까지 흰색 후보로 포함`,
-            canvas: matToCanvas(cv, maskedBinary),
+            label:
+              '7. 어두운 영역 이진화',
+
+            description:
+              `홍채 내부 ${Math.round(
+                PUPIL_THRESHOLD_PERCENTILE
+                * 100,
+              )}백분위 + ${PUPIL_THRESHOLD_OFFSET} 기준 임계값 ${darkThreshold}로 중간 정도의 어두운 픽셀까지 흰색 후보로 포함`,
+
+            canvas:
+              matToCanvas(
+                cv,
+                maskedBinary,
+              ),
           },
           {
             key: 'morphology',
-            label: '8. 형태학 보정',
-            description: '열기·닫기 연산으로 작은 잡음을 제거하고 끊어진 동공 후보를 연결',
-            canvas: matToCanvas(cv, closed),
+            label:
+              '8. 형태학 보정',
+
+            description:
+              '열기·닫기 연산으로 작은 잡음을 제거하고 끊어진 동공 후보를 연결',
+
+            canvas:
+              matToCanvas(
+                cv,
+                closed,
+              ),
           },
           {
             key: 'hole-fill',
-            label: '9. 작은 내부 구멍 제거',
-            description: `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 내부 검은 영역, ${holeFill.filledPixelCount}px를 채움 · 홍채 면적의 ${Math.round(PUPIL_HOLE_MAX_AREA_RATIO * 100)}% 범위, 최대 ${maxHolePixels}px까지 채움`,
-            canvas: matToCanvas(cv, holeFilled),
+            label:
+              '9. 작은 내부 구멍 제거',
+
+            description:
+              `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 내부 검은 영역, ${holeFill.filledPixelCount}px를 채움 · 홍채 면적의 ${Math.round(
+                PUPIL_HOLE_MAX_AREA_RATIO
+                * 100,
+              )}% 범위, 최대 ${maxHolePixels}px까지 채움`,
+
+            canvas:
+              matToCanvas(
+                cv,
+                holeFilled,
+              ),
           },
           {
             key: 'result',
-            label: '10. 원·타원 fitting 결과',
-            description: displayCandidate
-              ? displayCandidate.type === 'partial-arc-circle'
-                ? [
-                  'RANSAC 부분 원호 복원 원 선택',
-                  `반지름 ${(displayCandidate.radiusExpansionRatio * 100).toFixed(0)}%`,
-                  `가시 원호 ${(displayCandidate.arcCoverageDegrees || displayCandidate.arcCoverage * 360).toFixed(0)}°`,
-                  `inlier ${(displayCandidate.arcInlierRatio * 100).toFixed(0)}%`,
-                  `좌우 균형 ${(displayCandidate.arcSideBalance * 100).toFixed(0)}%`,
-                  `P90 오차 ${displayCandidate.arcResidualP90.toFixed(1)}px`,
-                  displayCandidate.topOcclusionDetected
-                    ? '위쪽 눈꺼풀 가림 감지'
-                    : '명확한 위쪽 가림 없음',
-                  '회색 점선=면적 원, 보라=복원 원, 파랑=최종 중심',
-                ].join(' · ')
-                : `${displayCandidate.type} 선택 · IoU ${(displayCandidate.iou * 100).toFixed(0)}% · 적합도 ${(displayCandidate.score * 100).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
-              : '유효한 fitting 후보가 없어 MediaPipe 홍채 중심을 사용',
-            canvas: finalOverlay,
+            label:
+              '10. 원·타원 fitting 결과',
+
+            description:
+              displayCandidate
+                ? displayCandidate.type
+                    === 'partial-arc-circle'
+                  ? [
+                    'RANSAC 부분 원호 복원 원 선택',
+
+                    `반지름 ${(
+                      displayCandidate
+                        .radiusExpansionRatio
+                      * 100
+                    ).toFixed(0)}%`,
+
+                    `가시 원호 ${(
+                      displayCandidate
+                        .arcCoverageDegrees
+                      || displayCandidate
+                        .arcCoverage
+                        * 360
+                    ).toFixed(0)}°`,
+
+                    `inlier ${(
+                      displayCandidate
+                        .arcInlierRatio
+                      * 100
+                    ).toFixed(0)}%`,
+
+                    `좌우 균형 ${(
+                      displayCandidate
+                        .arcSideBalance
+                      * 100
+                    ).toFixed(0)}%`,
+
+                    `P90 오차 ${
+                      displayCandidate
+                        .arcResidualP90
+                        .toFixed(1)
+                    }px`,
+
+                    occlusionText,
+
+                    '회색 점선=면적 원, 보라=복원 원, 파랑=최종 중심',
+                  ].join(' · ')
+                  : `${displayCandidate.type} 선택 · IoU ${(
+                    displayCandidate.iou
+                    * 100
+                  ).toFixed(0)}% · 적합도 ${(
+                    displayCandidate.score
+                    * 100
+                  ).toFixed(0)}% · 주황=탐색영역, 흰 점=MediaPipe, 보라=OpenCV 후보, 파랑=최종 중심`
+                : '유효한 fitting 후보가 없어 MediaPipe 홍채 중심을 사용',
+
+            canvas:
+              finalOverlay,
           },
         ],
       };
@@ -1273,28 +3059,77 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
       side,
       region,
       mediaPipeCenter,
-      detectedCenter: best?.detectedCenter ?? null,
-      finalCenter: selected.center,
-      source: selected.source,
-      detectedWeight: selected.detectedWeight,
-      confidence: best?.confidence ?? 0,
-      ellipse: best?.ellipseGlobal ?? null,
-      diagnostics: best,
+
+      detectedCenter:
+        best?.detectedCenter
+        ?? null,
+
+      finalCenter:
+        selected.center,
+
+      source:
+        selected.source,
+
+      detectedWeight:
+        selected.detectedWeight,
+
+      confidence:
+        best?.confidence ?? 0,
+
+      ellipse:
+        best?.ellipseGlobal
+        ?? null,
+
+      diagnostics:
+        best,
+
       debug,
     };
   } finally {
     for (const mat of [
-      sourceMat, gray, gamma, enhanced, blurred, mask, binary, maskedBinary,
-      opened, closed, holeFilled, kernelSmall, kernelLarge, contours, hierarchy,
+      sourceMat,
+      gray,
+      gamma,
+      enhanced,
+      blurred,
+      mask,
+      binary,
+      maskedBinary,
+      opened,
+      closed,
+      holeFilled,
+      kernelSmall,
+      kernelLarge,
+      contours,
+      hierarchy,
     ]) {
-      try { mat?.delete(); } catch { /* Ignore OpenCV cleanup failures. */ }
+      try {
+        mat?.delete();
+      } catch {
+        // OpenCV 해제 오류 무시
+      }
     }
   }
 }
 
-export function fallbackPupilResult(landmarks, side, width, height, reason = 'opencv-unavailable') {
-  const definition = EYE_DEFINITIONS[side];
-  const center = pointToPixel(landmarks[definition.irisCenter], width, height);
+export function fallbackPupilResult(
+  landmarks,
+  side,
+  width,
+  height,
+  reason = 'opencv-unavailable',
+) {
+  const definition =
+    EYE_DEFINITIONS[side];
+
+  const center = pointToPixel(
+    landmarks[
+      definition.irisCenter
+    ],
+    width,
+    height,
+  );
+
   return {
     side,
     mediaPipeCenter: center,
@@ -1308,17 +3143,56 @@ export function fallbackPupilResult(landmarks, side, width, height, reason = 'op
   };
 }
 
-export function refinePupilCenters({ source, landmarks, width, height, cv = window.cv, includeDebug = false }) {
+export function refinePupilCenters({
+  source,
+  landmarks,
+  width,
+  height,
+  cv = window.cv,
+  includeDebug = false,
+}) {
   if (!cv?.Mat) {
     return {
       right: {
-        ...fallbackPupilResult(landmarks, 'right', width, height),
-        debug: includeDebug ? buildFallbackDebug(source, landmarks, 'right', width, height, 'OpenCV 사용 불가') : null,
+        ...fallbackPupilResult(
+          landmarks,
+          'right',
+          width,
+          height,
+        ),
+
+        debug: includeDebug
+          ? buildFallbackDebug(
+            source,
+            landmarks,
+            'right',
+            width,
+            height,
+            'OpenCV 사용 불가',
+          )
+          : null,
       },
+
       left: {
-        ...fallbackPupilResult(landmarks, 'left', width, height),
-        debug: includeDebug ? buildFallbackDebug(source, landmarks, 'left', width, height, 'OpenCV 사용 불가') : null,
+        ...fallbackPupilResult(
+          landmarks,
+          'left',
+          width,
+          height,
+        ),
+
+        debug: includeDebug
+          ? buildFallbackDebug(
+            source,
+            landmarks,
+            'left',
+            width,
+            height,
+            'OpenCV 사용 불가',
+          )
+          : null,
       },
+
       available: false,
       meanConfidence: 0,
       minConfidence: 0,
@@ -1328,32 +3202,109 @@ export function refinePupilCenters({ source, landmarks, width, height, cv = wind
 
   let right;
   let left;
+
   try {
-    right = detectPupilWithOpenCv(cv, source, landmarks, 'right', width, height, { includeDebug });
+    right =
+      detectPupilWithOpenCv(
+        cv,
+        source,
+        landmarks,
+        'right',
+        width,
+        height,
+        { includeDebug },
+      );
   } catch (error) {
-    console.warn('Right pupil refinement failed.', error);
+    console.warn(
+      'Right pupil refinement failed.',
+      error,
+    );
+
     right = {
-      ...fallbackPupilResult(landmarks, 'right', width, height, error.message),
-      debug: includeDebug ? buildFallbackDebug(source, landmarks, 'right', width, height, error.message) : null,
-    };
-  }
-  try {
-    left = detectPupilWithOpenCv(cv, source, landmarks, 'left', width, height, { includeDebug });
-  } catch (error) {
-    console.warn('Left pupil refinement failed.', error);
-    left = {
-      ...fallbackPupilResult(landmarks, 'left', width, height, error.message),
-      debug: includeDebug ? buildFallbackDebug(source, landmarks, 'left', width, height, error.message) : null,
+      ...fallbackPupilResult(
+        landmarks,
+        'right',
+        width,
+        height,
+        error.message,
+      ),
+
+      debug: includeDebug
+        ? buildFallbackDebug(
+          source,
+          landmarks,
+          'right',
+          width,
+          height,
+          error.message,
+        )
+        : null,
     };
   }
 
-  const confidences = [right.confidence, left.confidence];
+  try {
+    left =
+      detectPupilWithOpenCv(
+        cv,
+        source,
+        landmarks,
+        'left',
+        width,
+        height,
+        { includeDebug },
+      );
+  } catch (error) {
+    console.warn(
+      'Left pupil refinement failed.',
+      error,
+    );
+
+    left = {
+      ...fallbackPupilResult(
+        landmarks,
+        'left',
+        width,
+        height,
+        error.message,
+      ),
+
+      debug: includeDebug
+        ? buildFallbackDebug(
+          source,
+          landmarks,
+          'left',
+          width,
+          height,
+          error.message,
+        )
+        : null,
+    };
+  }
+
+  const confidences = [
+    right.confidence,
+    left.confidence,
+  ];
+
   return {
     right,
     left,
     available: true,
-    meanConfidence: (confidences[0] + confidences[1]) / 2,
-    minConfidence: Math.min(...confidences),
-    fallbackCount: [right, left].filter((item) => item.source === 'mediapipe').length,
+
+    meanConfidence:
+      (
+        confidences[0]
+        + confidences[1]
+      ) / 2,
+
+    minConfidence:
+      Math.min(...confidences),
+
+    fallbackCount:
+      [right, left].filter(
+        (item) =>
+          item.source
+          === 'mediapipe',
+      ).length,
   };
 }
