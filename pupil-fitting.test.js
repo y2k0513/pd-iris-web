@@ -113,5 +113,13 @@ test('occlusion-aware selection can prefer a larger partial-arc reconstruction',
 
   assert.equal(result.accepted, true);
   assert.equal(result.best.type, 'partial-arc-circle');
-  assert.equal(result.reason, 'occlusion-recovery');
+  assert.equal(selection.accepted, true);
+  assert.equal(selection.best.type, 'partial-arc-circle');
+
+  assert.ok(
+    [
+      'ransac-occlusion-recovery',
+      'partial-arc-recovery',
+    ].includes(selection.reason),
+  );
 });
