@@ -784,15 +784,74 @@ async function analyzeFrame(canvas, cv, captureMethod = 'unknown') {
     cv,
     includeDebug: config.showProcessing,
   });
+  /*
+   * pupilRefinement.*.ellipse는 원본 이미지 좌표계의
+   * 3.5% 확대된 보라색 fitting 원이다.
+   */
+  const rightPurpleCircle =
+    pupilRefinement.right.ellipse;
+
+  const leftPurpleCircle =
+    pupilRefinement.left.ellipse;
+
+  const validPurpleCircle = (circle) => (
+    circle
+    && Number.isFinite(circle.x)
+    && Number.isFinite(circle.y)
+    && Number.isFinite(circle.width)
+    && Number.isFinite(circle.height)
+    && circle.width > 0
+    && circle.height > 0
+  );
+
+  if (
+    !validPurpleCircle(rightPurpleCircle)
+    || !validPurpleCircle(leftPurpleCircle)
+  ) {
+    throw new Error(
+      '양쪽 보라색 기준 원을 모두 검출하지 못했습니다.',
+    );
+  }
+
+  const rightPurpleDiameter =
+    (
+      rightPurpleCircle.width
+      + rightPurpleCircle.height
+    ) / 2;
+
+  const leftPurpleDiameter =
+    (
+      leftPurpleCircle.width
+      + leftPurpleCircle.height
+    ) / 2;
+
   const measurement = measurePd({
     landmarks,
     matrix,
     width: canvas.width,
     height: canvas.height,
-    irisReferenceMm: config.irisReferenceMm,
+
+    // 보라색 원 평균 지름을 실제 11.7mm로 가정
+    irisReferenceMm:
+      config.irisReferenceMm,
+
+    // 보라색 원 자체의 중심 사용
     centerOverrides: {
-      right: pupilRefinement.right.finalCenter,
-      left: pupilRefinement.left.finalCenter,
+      right: {
+        x: rightPurpleCircle.x,
+        y: rightPurpleCircle.y,
+      },
+
+      left: {
+        x: leftPurpleCircle.x,
+        y: leftPurpleCircle.y,
+      },
+    },
+
+    // 3.5% 확대된 보라색 원 자체의 지름 사용
+    diameterOverrides: {
+      right: rightPurpleDiameter,
+      left: leftPurpleDiameter,
     },
   });
   measurement.eyeImageQuality = eyeImageQuality;
