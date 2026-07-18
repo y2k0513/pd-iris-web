@@ -36,10 +36,13 @@ const PUPIL_THRESHOLD_OFFSET = 10;
 const PUPIL_THRESHOLD_MIN = 12;
 const PUPIL_THRESHOLD_MAX = 180;
 const PUPIL_OPEN_KERNEL_SIZE = 3;
-const PUPIL_CLOSE_KERNEL_SIZE = 5;
-const PUPIL_HOLE_MAX_AREA_RATIO = 0.02;
-const PUPIL_HOLE_MAX_AREA_MIN = 8;
-const PUPIL_HOLE_MAX_AREA_MAX = 220;
+const PUPIL_CLOSE_KERNEL_SIZE = 7;
+const PUPIL_HOLE_MAX_AREA_RATIO = 0.08;
+const PUPIL_HOLE_MAX_AREA_MIN = 12;
+const PUPIL_HOLE_MAX_AREA_MAX = 800;
+// Fill larger enclosed dark regions after closing. Border-connected black
+// pixels are still preserved as exterior background by the 4-neighbour
+// connected-component labelling step.
 
 let openCvReadyPromise = null;
 const scratchCanvas = document.createElement('canvas');
@@ -784,7 +787,7 @@ function detectPupilWithOpenCv(cv, source, landmarks, side, width, height, { inc
           {
             key: 'hole-fill',
             label: '9. 작은 내부 구멍 제거',
-            description: `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 구멍, ${holeFill.filledPixelCount}px를 채움 · ${maxHolePixels}px 이하만 제거`,
+            description: `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 내부 검은 영역, ${holeFill.filledPixelCount}px를 채움 · 홍채 면적의 ${Math.round(PUPIL_HOLE_MAX_AREA_RATIO * 100)}% 범위, 최대 ${maxHolePixels}px까지 채움`,
             canvas: matToCanvas(cv, holeFilled),
           },
           {
