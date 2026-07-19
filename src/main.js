@@ -31,6 +31,7 @@ const VIDEO_FRAME_MAX_DIMENSION = 1280;
 const OPENCV_READY_TIMEOUT_MS = 8000;
 const MAX_CAPTURE_DIMENSION = 4096;
 
+
 const elements = {
   mediaStage: document.querySelector('#mediaStage'),
   cameraVideo: document.querySelector('#cameraVideo'),
