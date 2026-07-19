@@ -12,6 +12,9 @@ import {
   measureEyeImageQuality,
   refinePupilCenters,
 } from './pupil.js';
+import {
+  refineIrisBoundaries,
+} from './iris.js';
 
 const OFFICIAL_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
@@ -21,8 +24,8 @@ const STABLE_FRAME_TARGET = 4;
 const MAX_PD_VARIATION_RATIO = 0.025;
 const AUTO_CAPTURE_DELAY_MS = 1000;
 const VIDEO_CAPTURE_DURATION_MS = 1000;
-const VIDEO_CAPTURE_SAMPLE_COUNT = 16;
-const VIDEO_ANALYSIS_FRAME_COUNT = 7;
+const VIDEO_CAPTURE_SAMPLE_COUNT = 8;
+const VIDEO_ANALYSIS_FRAME_COUNT = 4;
 const MIN_VIDEO_VALID_FRAMES = 3;
 const VIDEO_FRAME_MAX_DIMENSION = 1280;
 const OPENCV_READY_TIMEOUT_MS = 8000;
@@ -1167,45 +1170,88 @@ async function analyzeFrame(
     includeDebug: config.showProcessing,
   });
   /*
-   * pupilRefinement.*.ellipse는 원본 이미지 좌표계의
-   * 3.5% 확대된 보라색 fitting 원이다.
+   * 기존 어두운 영역 기반 동공 fitting은 홍채 외곽 탐색의
+   * 초기 중심으로 사용한다. 그 바깥에서 radial gradient를
+   * 추적해 홍채-공막 경계(limbus)를 별도로 fitting한다.
    */
-  const rightPurpleCircle =
-    pupilRefinement.right.ellipse;
+  const irisRefinement =
+    refineIrisBoundaries({
+      source: canvas,
+      landmarks,
+      width: canvas.width,
+      height: canvas.height,
+      cv,
+      pupilRefinement,
+      includeDebug:
+        config.showProcessing,
+    });
 
-  const leftPurpleCircle =
-    pupilRefinement.left.ellipse;
-
-  const validPurpleCircle = (circle) => (
-    circle
-    && Number.isFinite(circle.x)
-    && Number.isFinite(circle.y)
-    && Number.isFinite(circle.width)
-    && Number.isFinite(circle.height)
-    && circle.width > 0
-    && circle.height > 0
+  const validEllipse = (ellipse) => (
+    ellipse
+    && Number.isFinite(ellipse.x)
+    && Number.isFinite(ellipse.y)
+    && Number.isFinite(ellipse.width)
+    && Number.isFinite(ellipse.height)
+    && ellipse.width > 0
+    && ellipse.height > 0
   );
 
+  const rightPupilCircle =
+    pupilRefinement.right.ellipse;
+
+  const leftPupilCircle =
+    pupilRefinement.left.ellipse;
+
+  /*
+   * 좌우 홍채 외곽이 모두 신뢰도를 통과했을 때만 limbus
+   * ellipse를 PD 기준으로 사용한다. 한쪽만 섞으면 좌우
+   * 스케일 기준이 달라지므로 두 눈을 한 쌍으로 전환한다.
+   */
+  const useLimbusPair = (
+    irisRefinement.acceptedBoth
+    && validEllipse(
+      irisRefinement.right.ellipse,
+    )
+    && validEllipse(
+      irisRefinement.left.ellipse,
+    )
+  );
+
+  const rightReferenceEllipse =
+    useLimbusPair
+      ? irisRefinement.right.ellipse
+      : rightPupilCircle;
+
+  const leftReferenceEllipse =
+    useLimbusPair
+      ? irisRefinement.left.ellipse
+      : leftPupilCircle;
+
   if (
-    !validPurpleCircle(rightPurpleCircle)
-    || !validPurpleCircle(leftPurpleCircle)
+    !validEllipse(rightReferenceEllipse)
+    || !validEllipse(leftReferenceEllipse)
   ) {
     throw new Error(
-      '양쪽 보라색 기준 원을 모두 검출하지 못했습니다.',
+      '양쪽 홍채 외곽 또는 보라색 기준 원을 모두 검출하지 못했습니다.',
     );
   }
 
-  const rightPurpleDiameter =
+  const rightReferenceDiameter =
     (
-      rightPurpleCircle.width
-      + rightPurpleCircle.height
+      rightReferenceEllipse.width
+      + rightReferenceEllipse.height
     ) / 2;
 
-  const leftPurpleDiameter =
+  const leftReferenceDiameter =
     (
-      leftPurpleCircle.width
-      + leftPurpleCircle.height
+      leftReferenceEllipse.width
+      + leftReferenceEllipse.height
     ) / 2;
+
+  const referenceGeometrySource =
+    useLimbusPair
+      ? 'opencv-limbus-ellipse'
+      : 'opencv-dark-region-fallback';
 
   const measurement = measurePd({
     landmarks,
@@ -1217,28 +1263,44 @@ async function analyzeFrame(
     irisReferenceMm:
       config.irisReferenceMm,
 
-    // 보라색 원 자체의 중심 사용
+    // 양쪽 limbus 성공 시 홍채 외곽 중심, 아니면 기존 원 중심
     centerOverrides: {
       right: {
-        x: rightPurpleCircle.x,
-        y: rightPurpleCircle.y,
+        x: rightReferenceEllipse.x,
+        y: rightReferenceEllipse.y,
       },
 
       left: {
-        x: leftPurpleCircle.x,
-        y: leftPurpleCircle.y,
+        x: leftReferenceEllipse.x,
+        y: leftReferenceEllipse.y,
       },
     },
 
-    // 3.5% 확대된 보라색 원 자체의 지름 사용
+    // 같은 기준 ellipse의 평균 축 지름을 좌우 스케일에 사용
     diameterOverrides: {
-      right: rightPurpleDiameter,
-      left: leftPurpleDiameter,
+      right:
+        rightReferenceDiameter,
+
+      left:
+        leftReferenceDiameter,
     },
   });
   measurement.eyeImageQuality = eyeImageQuality;
   measurement.pupilRefinement = pupilRefinement;
-  measurement.captureMeta = { method: captureMethod };
+  measurement.irisRefinement = irisRefinement;
+  measurement.referenceGeometrySource =
+    referenceGeometrySource;
+
+  measurement.centerSource =
+    referenceGeometrySource;
+
+  measurement.diameterSource =
+    referenceGeometrySource;
+
+  measurement.captureMeta = {
+    method: captureMethod,
+    referenceGeometrySource,
+  };
   const quality = evaluateQuality(measurement, config);
   return { canvas, landmarks, measurement, quality };
 }
@@ -1358,7 +1420,7 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
       );
 
       setMessage(
-        '보라색 원 정밀 분석 중 '
+        '홍채 외곽 정밀 분석 중 '
         + (index + 1)
         + '/'
         + captures.length,
@@ -1465,9 +1527,22 @@ async function analyzeBurst(captures, { strictCapture, sampledFrameCount = null 
     const priorSummary = sexPrior.withinTypicalRange
       ? `${sexPrior.label} 분포 안 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`
       : `${sexPrior.label} 기준 ${sexPrior.minMm}–${sexPrior.maxMm}mm 밖 · raw ${sexPrior.rawPdMm.toFixed(1)} → 보정 ${sexPrior.adjustedPdMm.toFixed(1)}mm`;
-    const fallbackText = final.measurement.pupilRefinement.fallbackCount
-      ? ` · ${final.measurement.pupilRefinement.fallbackCount}개 눈 MediaPipe fallback`
-      : ' · 양쪽 OpenCV 동공 보정';
+    const referenceText =
+      final.measurement
+        .referenceGeometrySource
+        === 'opencv-limbus-ellipse'
+        ? ' · 양쪽 홍채 외곽 limbus ellipse'
+        : ' · 홍채 외곽 신뢰도 부족, 기존 보라색 원 fallback';
+
+    const fallbackText =
+      final.measurement
+        .pupilRefinement
+        .fallbackCount
+        ? (
+          referenceText
+          + ` · ${final.measurement.pupilRefinement.fallbackCount}개 눈 MediaPipe 중심 fallback`
+        )
+        : referenceText;
     const captureSummary =
       Number.isFinite(
         sampledFrameCount,
@@ -1676,7 +1751,14 @@ function renderProcessingDebug(measurement) {
   const selectedFrameText = burst
     ? `버스트 ${burst.frameCount}장 중 ${burst.selectedFrameIndex + 1}번째 프레임이 중앙값에 가장 가까워 시각화에 선택됨`
     : '단일 프레임 처리과정';
-  elements.processingSummary.textContent = `${selectedFrameText} · 실제 PD에는 파란 최종 중심이 사용됩니다. OpenCV 신뢰도가 낮으면 흰색 MediaPipe 중심으로 fallback합니다.`;
+  const referenceText =
+    measurement.referenceGeometrySource
+      === 'opencv-limbus-ellipse'
+      ? '청록색 홍채 외곽 ellipse 중심·지름을 PD 기준으로 사용'
+      : '홍채 외곽 신뢰도가 부족해 기존 보라색 원을 PD 기준으로 사용';
+
+  elements.processingSummary.textContent =
+    `${selectedFrameText} · ${referenceText}. 파란 점은 실제 PD 중심입니다.`;
   renderEyeProcessing(elements.processingRight, elements.processingRightMeta, pupilRefinement.right);
   renderEyeProcessing(elements.processingLeft, elements.processingLeftMeta, pupilRefinement.left);
 }
@@ -1714,6 +1796,30 @@ function renderResult(sourceCanvas, landmarks, measurement, quality) {
   for (const pupil of [measurement.pupilRefinement?.left, measurement.pupilRefinement?.right]) {
     if (!pupil?.ellipse) continue;
     drawEllipse(context, pupil.ellipse, pupil.source === 'opencv' ? '#7f56d9' : '#fdb022', 2.5 * scale);
+  }
+
+  for (
+    const iris of [
+      measurement.irisRefinement?.left,
+      measurement.irisRefinement?.right,
+    ]
+  ) {
+    const ellipse =
+      iris?.ellipse
+      || iris?.candidateEllipse;
+
+    if (!ellipse) continue;
+
+    drawEllipse(
+      context,
+      ellipse,
+      iris.accepted
+        ? '#06b6d4'
+        : 'rgba(6,182,212,.45)',
+      iris.accepted
+        ? 3.2 * scale
+        : 1.6 * scale,
+    );
   }
 
   context.fillStyle = 'rgba(255,255,255,0.55)';
