@@ -21,9 +21,9 @@ const EYE_DEFINITIONS = Object.freeze({
 const LIMBUS_TARGET_MIN_WIDTH = 300;
 const LIMBUS_TARGET_MAX_WIDTH = 720;
 const LIMBUS_UPSCALE = 5;
-const LIMBUS_ANGLE_COUNT = 144;
-const LIMBUS_MIN_POINTS = 18;
-const LIMBUS_CONFIDENCE_THRESHOLD = 0.48;
+const LIMBUS_ANGLE_COUNT = 180;
+const LIMBUS_MIN_POINTS = 26;
+const LIMBUS_CONFIDENCE_THRESHOLD = 0.60;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -488,9 +488,9 @@ function robustFitEllipse(
 
     const cutoff =
       Math.max(
-        1.8,
+        1.4,
         center
-        + 2.8 * robustSigma,
+        + 2.2 * robustSigma,
       );
 
     const filtered =
@@ -1200,11 +1200,11 @@ function detectLimbusForEye({
     const accepted = (
       inliers.length
         >= LIMBUS_MIN_POINTS
-      && coverage >= 0.30
-      && axisRatio >= 0.66
-      && diameterRatio >= 0.72
-      && diameterRatio <= 1.34
-      && centerDistanceRatio <= 0.45
+      && coverage >= 0.40
+      && axisRatio >= 0.85
+      && diameterRatio >= 0.84
+      && diameterRatio <= 1.16
+      && centerDistanceRatio <= 0.28
       && confidence
         >= LIMBUS_CONFIDENCE_THRESHOLD
     );

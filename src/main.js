@@ -251,7 +251,7 @@ function getConfig() {
     maxPitch: Number(elements.maxPitchInput.value) || 7,
     maxRoll: Number(elements.maxRollInput.value) || 5,
     requirePose: true,
-    maxIrisDifferenceRatio: 0.10,
+    maxIrisDifferenceRatio: 0.05,
     minIrisPixels: Number(elements.minIrisPixelsInput.value) || 20,
     minFaceHeightRatio: 0.31,
     maxFaceHeightRatio: 0.58,
