@@ -50,6 +50,7 @@ const DEFAULT_OPENCV_URLS = [
 
 const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 30;
+const PUPIL_POST_PIVOT_CONTRAST_GAIN = 1.40;
 
 const PUPIL_THRESHOLD_PERCENTILE = 0.50;
 const PUPIL_THRESHOLD_OFFSET = 14;
@@ -63,8 +64,8 @@ const PUPIL_HOLE_MAX_AREA_RATIO = 0.08;
 const PUPIL_HOLE_MAX_AREA_MIN = 12;
 const PUPIL_HOLE_MAX_AREA_MAX = 800;
 
-const PUPIL_FIT_MIN_CONFIDENCE = 0.38;
-const PUPIL_FIT_FULL_CONFIDENCE = 0.72;
+const PUPIL_FIT_MIN_CONFIDENCE = 0.50;
+const PUPIL_FIT_FULL_CONFIDENCE = 0.80;
 
 const PUPIL_PRIMARY_COMPONENT_MIN_AREA_RATIO =
   0.008;
@@ -1058,6 +1059,58 @@ function pivotContrast(
           / safeSoftness,
         )
       );
+
+    lut.data[index] = clamp(
+      Math.round(mapped),
+      0,
+      255,
+    );
+  }
+
+  const output = new cv.Mat();
+
+  cv.LUT(
+    source,
+    lut,
+    output,
+  );
+
+  lut.delete();
+
+  return output;
+}
+
+function strengthenBlackWhiteContrast(
+  cv,
+  source,
+  gain =
+    PUPIL_POST_PIVOT_CONTRAST_GAIN,
+) {
+  if (
+    typeof cv.LUT !== 'function'
+  ) {
+    return source.clone();
+  }
+
+  const safeGain =
+    Math.max(1, gain);
+
+  const lut = new cv.Mat(
+    1,
+    256,
+    cv.CV_8UC1,
+  );
+
+  for (
+    let index = 0;
+    index < 256;
+    index += 1
+  ) {
+    const mapped =
+      128
+      + (
+        index - 128
+      ) * safeGain;
 
     lut.data[index] = clamp(
       Math.round(mapped),
@@ -2304,6 +2357,7 @@ function detectPupilWithOpenCv(
   let gray;
   let gamma;
   let enhanced;
+  let contrasted;
   let blurred;
   let mask;
   let binary;
@@ -2359,10 +2413,17 @@ function detectPupilWithOpenCv(
         PUPIL_TONE_SOFTNESS,
       );
 
+    contrasted =
+      strengthenBlackWhiteContrast(
+        cv,
+        enhanced,
+        PUPIL_POST_PIVOT_CONTRAST_GAIN,
+      );
+
     blurred = new cv.Mat();
 
     cv.GaussianBlur(
-      enhanced,
+      contrasted,
       blurred,
       new cv.Size(5, 5),
       0,
@@ -2916,9 +2977,27 @@ function detectPupilWithOpenCv(
               ),
           },
           {
+            key:
+              'contrast-strengthened',
+
+            label:
+              '5. 검·흰 대비 강화',
+
+            description:
+              `피벗 보정 결과를 중간 회색 기준 ${PUPIL_POST_PIVOT_CONTRAST_GAIN.toFixed(
+                2,
+              )}배로 벌려 검정·흰색 분리를 강화`,
+
+            canvas:
+              matToCanvas(
+                cv,
+                contrasted,
+              ),
+          },
+          {
             key: 'blurred',
             label:
-              '5. Gaussian blur',
+              '6. Gaussian blur',
 
             description:
               '속눈썹·센서 잡음 같은 고주파 노이즈를 완화',
@@ -2932,7 +3011,7 @@ function detectPupilWithOpenCv(
           {
             key: 'mask',
             label:
-              '6. 홍채 탐색 마스크',
+              '7. 홍채 탐색 마스크',
 
             description:
               'MediaPipe 홍채 중심 주변만 남겨 눈꺼풀과 속눈썹 후보를 제한',
@@ -2946,7 +3025,7 @@ function detectPupilWithOpenCv(
           {
             key: 'threshold',
             label:
-              '7. 어두운 영역 이진화',
+              '8. 어두운 영역 이진화',
 
             description:
               `홍채 내부 ${Math.round(
@@ -2963,7 +3042,7 @@ function detectPupilWithOpenCv(
           {
             key: 'morphology',
             label:
-              '8. 형태학 보정',
+              '9. 형태학 보정',
 
             description:
               '열기·닫기 연산으로 작은 잡음을 제거하고 끊어진 동공 후보를 연결',
@@ -2977,7 +3056,7 @@ function detectPupilWithOpenCv(
           {
             key: 'hole-fill',
             label:
-              '9. 작은 내부 구멍 제거',
+              '10. 작은 내부 구멍 제거',
 
             description:
               `4방향 연결요소 라벨링으로 ${holeFill.filledComponentCount}개 내부 검은 영역, ${holeFill.filledPixelCount}px를 채움 · 홍채 면적의 ${Math.round(
@@ -2994,7 +3073,7 @@ function detectPupilWithOpenCv(
           {
             key: 'result',
             label:
-              '10. 원·타원 fitting 결과',
+              '11. 원·타원 fitting 결과',
 
             description:
               displayCandidate
@@ -3091,6 +3170,7 @@ function detectPupilWithOpenCv(
       gray,
       gamma,
       enhanced,
+      contrasted,
       blurred,
       mask,
       binary,

@@ -1,7 +1,8 @@
 export const DEFAULT_PUPIL_FIT_THRESHOLDS = Object.freeze({
-  minScore: 0.38,
-  minIou: 0.30,
-  maxCenterDistanceRatio: 0.80,
+  minScore: 0.48,
+  minIou: 0.42,
+  maxCenterDistanceRatio: 0.55,
+  minAxisRatio: 0.80,
 });
 
 function clamp(value, min, max) {
@@ -1325,7 +1326,17 @@ export function chooseBestPupilFit(
     best.score >= thresholds.minScore
     && best.iou >= thresholds.minIou
     && best.centerDistanceRatio
-      <= thresholds.maxCenterDistanceRatio;
+      <= thresholds.maxCenterDistanceRatio
+    && (
+      !Number.isFinite(
+        thresholds.minAxisRatio,
+      )
+      || !Number.isFinite(
+        best.axisRatio,
+      )
+      || best.axisRatio
+        >= thresholds.minAxisRatio
+    );
 
   return {
     best,
