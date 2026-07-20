@@ -50,10 +50,11 @@ const DEFAULT_OPENCV_URLS = [
 
 const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 30;
-const PUPIL_POST_PIVOT_CONTRAST_GAIN = 1.40;
+const PUPIL_POST_PIVOT_CONTRAST_GAIN = 1.80;
+const PUPIL_POST_PIVOT_LIGHT_GAIN = 1.05;
 
-const PUPIL_THRESHOLD_PERCENTILE = 0.50;
-const PUPIL_THRESHOLD_OFFSET = 14;
+const PUPIL_THRESHOLD_PERCENTILE = 0.60;
+const PUPIL_THRESHOLD_OFFSET = 18;
 const PUPIL_THRESHOLD_MIN = 12;
 const PUPIL_THRESHOLD_MAX = 180;
 
@@ -1083,8 +1084,10 @@ function pivotContrast(
 function strengthenBlackWhiteContrast(
   cv,
   source,
-  gain =
+  darkGain =
     PUPIL_POST_PIVOT_CONTRAST_GAIN,
+  lightGain =
+    PUPIL_POST_PIVOT_LIGHT_GAIN,
 ) {
   if (
     typeof cv.LUT !== 'function'
@@ -1092,8 +1095,13 @@ function strengthenBlackWhiteContrast(
     return source.clone();
   }
 
-  const safeGain =
-    Math.max(1, gain);
+  const safeDarkGain =
+    Math.max(1, darkGain);
+
+  const safeLightGain =
+    Math.max(1, lightGain);
+
+  const midpoint = 128;
 
   const lut = new cv.Mat(
     1,
@@ -1107,10 +1115,19 @@ function strengthenBlackWhiteContrast(
     index += 1
   ) {
     const mapped =
-      128
-      + (
-        index - 128
-      ) * safeGain;
+      index < midpoint
+        ? (
+          midpoint
+          - (
+            midpoint - index
+          ) * safeDarkGain
+        )
+        : (
+          midpoint
+          + (
+            index - midpoint
+          ) * safeLightGain
+        );
 
     lut.data[index] = clamp(
       Math.round(mapped),
@@ -2984,9 +3001,11 @@ function detectPupilWithOpenCv(
               '5. 검·흰 대비 강화',
 
             description:
-              `피벗 보정 결과를 중간 회색 기준 ${PUPIL_POST_PIVOT_CONTRAST_GAIN.toFixed(
+              `중간 회색 기준 어두운 영역은 ${PUPIL_POST_PIVOT_CONTRAST_GAIN.toFixed(
                 2,
-              )}배로 벌려 검정·흰색 분리를 강화`,
+              )}배, 밝은 영역은 ${PUPIL_POST_PIVOT_LIGHT_GAIN.toFixed(
+                2,
+              )}배로 분리해 검은 영역을 우선 강화`,
 
             canvas:
               matToCanvas(
