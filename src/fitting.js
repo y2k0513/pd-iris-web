@@ -1450,35 +1450,42 @@ export function chooseOcclusionAwarePupilFit(
     && sideBalance >= 0.32
     && partial.arcResidualP90
       <= residualLimit
-    && expansion >= 1.02
-    && expansion <= 1.25;
-
-  const occlusionPreferred =
-    occlusionDetected
-    && partial.arcCoverage
-      >= requiredArcCoverage
-    && inlierRatio
-      >= requiredInlierRatio;
+    && expansion >= 1.01
+    && expansion <= 1.12;
 
   const competitive =
     !normalSelection.best
     || partial.score
-      >= normalSelection.best.score - 0.08;
+      >= normalSelection.best.score - 0.02;
 
-  if (
+  const normalFitIsReliable =
+    Boolean(
+      normalSelection.accepted
+      && normalSelection.best,
+    );
+
+  const shouldUsePartial =
     partialPlausible
     && (
-      occlusionPreferred
-      || competitive
-    )
-  ) {
+      !normalFitIsReliable
+      || (
+        !bothSidesOccluded
+        && competitive
+      )
+    );
+
+  if (shouldUsePartial) {
     return {
       best: partial,
       accepted: true,
-      reason: occlusionPreferred
-        ? 'ransac-occlusion-recovery'
-        : 'partial-arc-recovery',
-      replaced: normalSelection.best,
+
+      reason:
+        occlusionDetected
+          ? 'ransac-occlusion-recovery'
+          : 'partial-arc-recovery',
+
+      replaced:
+        normalSelection.best,
     };
   }
 

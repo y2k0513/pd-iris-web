@@ -89,7 +89,7 @@ test('partial arc fitting reconstructs a circle hidden by an upper eyelid cut', 
   assert.ok(fitted.arcCoverage > 0.5);
 });
 
-test('occlusion-aware selection can prefer a larger partial-arc reconstruction', () => {
+test('accepted equivalent circle stays preferred when partial arc is not competitive', () => {
   const candidates = [
     {
       type: 'equivalent-circle',
@@ -125,6 +125,12 @@ test('occlusion-aware selection can prefer a larger partial-arc reconstruction',
   const selection = chooseOcclusionAwarePupilFit(candidates);
 
   assert.equal(selection.accepted, true);
-  assert.equal(selection.best.type, 'partial-arc-circle');
-  assert.equal(selection.reason, 'ransac-occlusion-recovery');
+  assert.equal(
+    selection.best.type,
+    'equivalent-circle',
+  );
+  assert.equal(
+    selection.reason,
+    'accepted',
+  );
 });
