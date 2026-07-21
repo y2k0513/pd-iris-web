@@ -1,8 +1,8 @@
 export const DEFAULT_PUPIL_FIT_THRESHOLDS = Object.freeze({
-  minScore: 0.48,
-  minIou: 0.42,
-  maxCenterDistanceRatio: 0.55,
-  minAxisRatio: 0.80,
+  minScore: 0.50,
+  minIou: 0.46,
+  maxCenterDistanceRatio: 0.48,
+  minAxisRatio: 0.88,
 });
 
 function clamp(value, min, max) {
@@ -517,14 +517,14 @@ function detectHorizontalCuts(
     points,
     upperIndices,
     equivalentRadius,
-    0.25,
+    0.20,
   );
 
   const lower = summarizeHorizontalCut(
     points,
     lowerIndices,
     equivalentRadius,
-    0.18,
+    0.15,
   );
 
   /*
@@ -572,11 +572,11 @@ function detectHorizontalCuts(
 
   upper.detected =
     upper.detected
-    && upper.extentRatio <= 0.88;
+    && upper.extentRatio <= 0.92;
 
   lower.detected =
     lower.detected
-    && lower.extentRatio <= 0.88;
+    && lower.extentRatio <= 0.92;
 
   return {
     upper,
@@ -660,7 +660,7 @@ export function selectVisiblePupilArcPoints(
     irisCenter,
     irisRadius,
     equivalentRadius,
-    angleBinDegrees = 5,
+    angleBinDegrees = 4,
   } = {},
 ) {
   if (
@@ -840,7 +840,7 @@ export function fitPartialArcCircle(
   points,
   {
     minPoints = 10,
-    ransacIterations = 200,
+    ransacIterations = 320,
     irisCenter = null,
     irisRadius = null,
     equivalentRadius = null,
@@ -1390,8 +1390,8 @@ export function chooseOcclusionAwarePupilFit(
     partial.width / 2;
 
   const residualLimit = Math.max(
-    2.2,
-    radius * 0.09,
+    1.8,
+    radius * 0.075,
   );
 
   const inlierRatio = Number.isFinite(
@@ -1419,18 +1419,18 @@ export function chooseOcclusionAwarePupilFit(
 
   const requiredArcCoverage =
     bothSidesOccluded
-      ? 0.28
-      : 0.34;
+      ? 0.26
+      : 0.31;
 
   const requiredInlierRatio =
     bothSidesOccluded
-      ? 0.48
-      : 0.50;
+      ? 0.52
+      : 0.56;
 
   const minimumPartialScore =
     occlusionDetected
-      ? 0.40
-      : 0.44;
+      ? 0.46
+      : 0.50;
 
   const partialPlausible =
     partial.score >= Math.max(
@@ -1439,7 +1439,7 @@ export function chooseOcclusionAwarePupilFit(
     )
     && partial.centerDistanceRatio
       <= Math.min(
-        0.68,
+        0.48,
         thresholds.maxCenterDistanceRatio,
       )
     && partial.arcCoverage
@@ -1447,11 +1447,11 @@ export function chooseOcclusionAwarePupilFit(
     && partial.arcPointCount >= 10
     && inlierRatio
       >= requiredInlierRatio
-    && sideBalance >= 0.26
+    && sideBalance >= 0.32
     && partial.arcResidualP90
       <= residualLimit
-    && expansion >= 1.01
-    && expansion <= 1.35;
+    && expansion >= 1.02
+    && expansion <= 1.25;
 
   const occlusionPreferred =
     occlusionDetected
@@ -1463,7 +1463,7 @@ export function chooseOcclusionAwarePupilFit(
   const competitive =
     !normalSelection.best
     || partial.score
-      >= normalSelection.best.score - 0.12;
+      >= normalSelection.best.score - 0.08;
 
   if (
     partialPlausible

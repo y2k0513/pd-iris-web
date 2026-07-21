@@ -50,8 +50,9 @@ const DEFAULT_OPENCV_URLS = [
 
 const PUPIL_TONE_PIVOT_PERCENTILE = 0.18;
 const PUPIL_TONE_SOFTNESS = 30;
-const PUPIL_POST_PIVOT_CONTRAST_GAIN = 1.80;
-const PUPIL_POST_PIVOT_LIGHT_GAIN = 1.05;
+const PUPIL_CLAHE_CLIP_LIMIT = 2.6;
+const PUPIL_CLAHE_TILE_SIZE = 8;
+const PUPIL_POST_CLAHE_GAMMA = 1.18;
 
 const PUPIL_THRESHOLD_PERCENTILE = 0.60;
 const PUPIL_THRESHOLD_OFFSET = 18;
@@ -1081,72 +1082,56 @@ function pivotContrast(
   return output;
 }
 
-function strengthenBlackWhiteContrast(
+function enhancePupilContrast(
   cv,
   source,
-  darkGain =
-    PUPIL_POST_PIVOT_CONTRAST_GAIN,
-  lightGain =
-    PUPIL_POST_PIVOT_LIGHT_GAIN,
 ) {
+  /*
+   * 국소 히스토그램 평활화로 눈 영역 내부의 대비를 높인다.
+   * clip limit으로 피부·속눈썹 노이즈의 과증폭을 제한한다.
+   */
   if (
-    typeof cv.LUT !== 'function'
+    typeof cv.CLAHE !== 'function'
   ) {
-    return source.clone();
-  }
-
-  const safeDarkGain =
-    Math.max(1, darkGain);
-
-  const safeLightGain =
-    Math.max(1, lightGain);
-
-  const midpoint = 128;
-
-  const lut = new cv.Mat(
-    1,
-    256,
-    cv.CV_8UC1,
-  );
-
-  for (
-    let index = 0;
-    index < 256;
-    index += 1
-  ) {
-    const mapped =
-      index < midpoint
-        ? (
-          midpoint
-          - (
-            midpoint - index
-          ) * safeDarkGain
-        )
-        : (
-          midpoint
-          + (
-            index - midpoint
-          ) * safeLightGain
-        );
-
-    lut.data[index] = clamp(
-      Math.round(mapped),
-      0,
-      255,
+    return gammaCorrect(
+      cv,
+      source,
+      PUPIL_POST_CLAHE_GAMMA,
     );
   }
 
-  const output = new cv.Mat();
+  const claheOutput =
+    new cv.Mat();
 
-  cv.LUT(
-    source,
-    lut,
-    output,
-  );
+  const clahe =
+    new cv.CLAHE(
+      PUPIL_CLAHE_CLIP_LIMIT,
+      new cv.Size(
+        PUPIL_CLAHE_TILE_SIZE,
+        PUPIL_CLAHE_TILE_SIZE,
+      ),
+    );
 
-  lut.delete();
+  try {
+    clahe.apply(
+      source,
+      claheOutput,
+    );
 
-  return output;
+    /*
+     * gamma > 1:
+     * CLAHE 이후 중간톤을 검정 방향으로 눌러
+     * 동공과 어두운 홍채를 더 검게 만든다.
+     */
+    return gammaCorrect(
+      cv,
+      claheOutput,
+      PUPIL_POST_CLAHE_GAMMA,
+    );
+  } finally {
+    claheOutput.delete();
+    clahe.delete();
+  }
 }
 
 function cloneCanvas(sourceCanvas) {
@@ -2431,10 +2416,9 @@ function detectPupilWithOpenCv(
       );
 
     contrasted =
-      strengthenBlackWhiteContrast(
+      enhancePupilContrast(
         cv,
         enhanced,
-        PUPIL_POST_PIVOT_CONTRAST_GAIN,
       );
 
     blurred = new cv.Mat();
@@ -2998,14 +2982,14 @@ function detectPupilWithOpenCv(
               'contrast-strengthened',
 
             label:
-              '5. 검·흰 대비 강화',
+              '5. CLAHE 국소 대비 강화',
 
             description:
-              `중간 회색 기준 어두운 영역은 ${PUPIL_POST_PIVOT_CONTRAST_GAIN.toFixed(
+              `CLAHE clip ${PUPIL_CLAHE_CLIP_LIMIT.toFixed(
+                1,
+              )} · ${PUPIL_CLAHE_TILE_SIZE}×${PUPIL_CLAHE_TILE_SIZE} 타일 · gamma ${PUPIL_POST_CLAHE_GAMMA.toFixed(
                 2,
-              )}배, 밝은 영역은 ${PUPIL_POST_PIVOT_LIGHT_GAIN.toFixed(
-                2,
-              )}배로 분리해 검은 영역을 우선 강화`,
+              )}로 어두운 중간톤을 검정 방향으로 강화`,
 
             canvas:
               matToCanvas(
