@@ -273,16 +273,21 @@ function getConfig() {
 }
 
 function getSelectedSex() {
-  return elements.sexInput.value;
+  /*
+   * 기존 호출부와의 호환성을 유지하면서
+   * 실제 계산은 항상 공통 64mm prior를 사용한다.
+   */
+  return 'universal';
 }
 
 function updateSexPriorHint() {
-  const prior = SEX_PD_PRIORS[getSelectedSex()];
-  if (!prior) {
-    elements.sexPriorHint.textContent = '성별 분포를 선택하면 중심값 기반 soft prior를 적용합니다.';
-    return;
-  }
-  elements.sexPriorHint.textContent = `${prior.label} 기준 ${prior.minMm}–${prior.maxMm}mm · 중심 ${prior.centerMm}mm · 범위 끝에서 loss 1.0`;
+  const prior =
+    SEX_PD_PRIORS.universal;
+
+  elements.sexPriorHint.textContent =
+    `성별과 관계없이 중심 ${prior.centerMm}mm · `
+    + `${prior.scaleMm}mm 차이에서 loss 1.0 · `
+    + '64mm에서 멀수록 soft prior 영향 증가';
 }
 
 async function requestHighResolutionCamera() {

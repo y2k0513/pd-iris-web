@@ -104,10 +104,10 @@ test('sex PD prior loss follows configured center and scale', () => {
   }
 });
 
-test('sex PD prior softly pulls an outlying value toward the center without clipping', () => {
+test('universal 64mm PD prior softly pulls an outlying value toward the center without clipping', () => {
   const result = applySexPdPrior({ rawPdMm: 74, sex: 'male', qualityScore: 70, strength: 0.6 });
   assert.ok(result.adjustedPdMm < 74);
-  assert.ok(result.adjustedPdMm > 67);
+  assert.ok(result.adjustedPdMm > 64);
   assert.ok(result.priorLoss > 1);
   assert.ok(result.priorWeight > 0 && result.priorWeight < 1);
   assert.equal(result.withinTypicalRange, false);

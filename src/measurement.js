@@ -1,7 +1,16 @@
 
+export const UNIVERSAL_PD_PRIOR = Object.freeze({
+  label: '공통',
+  minMm: 58,
+  maxMm: 70,
+  centerMm: 64,
+  scaleMm: 3,
+});
+
 export const SEX_PD_PRIORS = Object.freeze({
-  male: Object.freeze({ label: '남성', minMm: 64, maxMm: 70, centerMm: 67, scaleMm: 3 }),
-  female: Object.freeze({ label: '여성', minMm: 58, maxMm: 64, centerMm: 61, scaleMm: 3 }),
+  male: UNIVERSAL_PD_PRIOR,
+  female: UNIVERSAL_PD_PRIOR,
+  universal: UNIVERSAL_PD_PRIOR,
 });
 
 function clamp(value, min, max) {
@@ -24,10 +33,8 @@ export function applySexPdPrior({
   qualityScore = 100,
   strength = 0.6,
 }) {
-  const prior = SEX_PD_PRIORS[sex];
-  if (!prior) {
-    throw new Error('성별을 남성 또는 여성으로 선택하세요.');
-  }
+  const prior =
+    UNIVERSAL_PD_PRIOR;
   if (!Number.isFinite(rawPdMm)) {
     throw new Error('유효한 PD 측정값이 필요합니다.');
   }
@@ -40,13 +47,23 @@ export function applySexPdPrior({
   // 품질 100점에서는 측정 표준오차를 약 0.8mm, 낮은 품질에서는 최대 3.0mm로 본다.
   const measurementSigmaMm = 0.8 + (1 - boundedQuality) * 2.2;
   const measurementPrecision = 1 / (measurementSigmaMm ** 2);
-  const priorPrecision = boundedStrength / (prior.scaleMm ** 2);
+  const distanceMultiplier =
+    clamp(
+      priorLoss,
+      0,
+      4,
+    );
+
+  const priorPrecision =
+    boundedStrength
+    * distanceMultiplier
+    / (prior.scaleMm ** 2);
   const totalPrecision = measurementPrecision + priorPrecision;
   const priorWeight = totalPrecision > 0 ? priorPrecision / totalPrecision : 0;
   const adjustedPdMm = rawPdMm * (1 - priorWeight) + prior.centerMm * priorWeight;
 
   return {
-    sex,
+    sex: sex || 'universal',
     label: prior.label,
     minMm: prior.minMm,
     maxMm: prior.maxMm,
@@ -56,6 +73,7 @@ export function applySexPdPrior({
     adjustedPdMm,
     normalizedDistance,
     priorLoss,
+    distanceMultiplier,
     priorWeight,
     measurementSigmaMm,
     withinTypicalRange: rawPdMm >= prior.minMm && rawPdMm <= prior.maxMm,
